@@ -42,6 +42,8 @@ import redback_jax
 
 ## Dependencies
 
+**Python 3.12+ required**
+
 Core dependencies:
 - JAX (>= 0.4.0)
 - NumPy (>= 1.20.0)

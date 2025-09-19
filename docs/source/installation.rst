@@ -4,7 +4,7 @@ Installation
 Requirements
 ------------
 
-redback-jax requires Python 3.8 or later.
+redback-jax requires Python 3.12 or later.
 
 Core dependencies:
 
