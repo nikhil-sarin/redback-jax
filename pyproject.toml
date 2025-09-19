@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redback-jax"
+version = "0.1.0"
+description = "A lightweight JAX-only version of redback for electromagnetic transient analysis"
+readme = "README.md"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "Nikhil Sarin", email = "nsarin.astro@gmail.com"}
+]
+maintainers = [
+    {name = "Nikhil Sarin", email = "nsarin.astro@gmail.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+keywords = ["astronomy", "astrophysics", "transients", "bayesian", "jax"]
+requires-python = ">=3.8"
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "pandas>=1.3.0",
+    "matplotlib>=3.5.0",
+    "astropy>=4.0.0",
+]
+
+[project.optional-dependencies]
+all = [
+    "numpyro>=0.12.0",
+    "blackjax>=1.0.0",
+    "optax>=0.1.0",
+]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "isort",
+    "flake8",
+    "pre-commit",
+]
+
+[project.urls]
+Homepage = "https://github.com/nikhil-sarin/redback-jax"
+Repository = "https://github.com/nikhil-sarin/redback-jax"
+Documentation = "https://redback-jax.readthedocs.io"
+"Bug Tracker" = "https://github.com/nikhil-sarin/redback-jax/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["redback_jax*"]
+
+[tool.setuptools.package-data]
+redback_jax = ["priors/*", "tables/*"]

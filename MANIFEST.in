@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include redback_jax/priors *
+recursive-include redback_jax/tables *
+global-exclude *.pyc
+global-exclude __pycache__
