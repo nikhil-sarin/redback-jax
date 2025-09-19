@@ -1,8 +1,6 @@
 name: Documentation
 
 on:
-  push:
-    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -29,9 +27,7 @@ jobs:
         cd docs
         make html
 
-    - name: Deploy to GitHub Pages
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./docs/_build/html
+    - name: Check documentation build
+      run: |
+        echo "Documentation built successfully"
+        ls -la docs/_build/html/

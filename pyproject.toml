@@ -65,7 +65,7 @@ docs = [
 [project.urls]
 Homepage = "https://github.com/nikhil-sarin/redback-jax"
 Repository = "https://github.com/nikhil-sarin/redback-jax"
-Documentation = "https://redback-jax.readthedocs.io"
+Documentation = "https://redback-jax.readthedocs.io/"
 "Bug Tracker" = "https://github.com/nikhil-sarin/redback-jax/issues"
 
 [tool.setuptools.packages.find]
