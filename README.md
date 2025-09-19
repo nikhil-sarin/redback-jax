@@ -1,6 +1,6 @@
 # Redback-JAX
 
-[![Documentation Status](https://readthedocs.org/projects/redback-jax/badge/?version=latest)](https://redback-jax.readthedocs.io/en/latest/?badge=latest)
+[![Documentation Status](https://readthedocs.org/projects/redback-jax/badge/?version=latest)](https://redback-jax.readthedocs.io/en/latest/)
 [![Tests](https://github.com/nikhil-sarin/redback-jax/workflows/Tests/badge.svg)](https://github.com/nikhil-sarin/redback-jax/actions)
 
 A lightweight JAX-only version of the [redback](https://github.com/nikhil-sarin/redback) electromagnetic transient analysis package.
