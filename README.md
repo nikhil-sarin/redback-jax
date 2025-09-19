@@ -70,7 +70,7 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## Documentation
 
-Full documentation is available at [redback-jax.readthedocs.io](https://redback-jax.readthedocs.io/).
+Full documentation is available at [redback-jax.readthedocs.io](https://redback-jax.readthedocs.io/en/latest/).
 
 ## Acknowledgments
 
