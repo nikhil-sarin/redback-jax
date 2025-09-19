@@ -48,11 +48,22 @@ all = [
 ]
 dev = [
     "pytest>=6.0",
-    "pytest-cov",
-    "black",
-    "isort",
-    "flake8",
-    "pre-commit",
+    "pytest-cov>=4.0",
+    "coverage[toml]>=6.0",
+    "black>=22.0",
+    "isort>=5.0",
+    "flake8>=5.0",
+    "pre-commit>=2.0",
+    "sphinx>=5.0",
+    "sphinx-rtd-theme>=1.0",
+    "myst-parser>=0.18",
+    "nbsphinx>=0.8",
+]
+docs = [
+    "sphinx>=5.0",
+    "sphinx-rtd-theme>=1.0",
+    "myst-parser>=0.18",
+    "nbsphinx>=0.8",
 ]
 
 [project.urls]
@@ -67,3 +78,74 @@ include = ["redback_jax*"]
 
 [tool.setuptools.package-data]
 redback_jax = ["priors/*", "tables/*"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = [
+    "--cov=redback_jax",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+    "--strict-markers",
+    "--strict-config",
+]
+testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+source = ["redback_jax"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "setup.py",
+    "versioneer.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
