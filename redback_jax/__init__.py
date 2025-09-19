@@ -9,4 +9,5 @@ __version__ = "0.1.0"
 __author__ = "Nikhil Sarin"
 __email__ = "nsarin.astro@gmail.com"
 
-# Core imports will be added as modules are developed
+# Core imports
+from .transient import Transient, Spectrum

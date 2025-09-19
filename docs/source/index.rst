@@ -9,6 +9,7 @@ Welcome to redback-jax, a lightweight JAX-only version of the redback electromag
 
    installation
    quickstart
+   transient_tutorial
    api
    examples
    contributing
