@@ -35,7 +35,6 @@ class TestPhenomenologicalModelsModule:
         )
         assert jnp.allclose(result, jnp.array([0.50654, 1.54579, 1.74911, 1.16408, 0.87522]), atol=1e-5)
 
-
     def test_exp_rise_powerlaw_decline(self):
         """Test the exp_rise_powerlaw_decline function."""
         time = [1.0, 5.0, 10.0, 20.0]
@@ -68,6 +67,42 @@ class TestPhenomenologicalModelsModule:
                 [12.30165, 17.30165, 22.30165],
                 [10.0, 15.0, 20.0],
                 [10.64137, 15.64137, 20.64137],
+            ]
+        )
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+    def test_bazin_sne(self):
+        """Test the bazin_sne function."""
+        time = [1.0, 5.0, 10.0, 20.0]
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.bazin_sne(
+            time,
+            1.0,  # aa normalization
+            2.0,  # bb additive constant
+            0.0,  # t0
+            4.0,  # tau_rise
+            10.0,  # tau_fall
+        )
+        expected = jnp.array([2.50867833, 2.4714562 , 2.33997278, 2.1344295 ])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        aa = jnp.array([0.0, 1.0, 2.0])
+        bb = jnp.array([5.0, 6.0, 7.0])
+
+        result = phenomenological_models.bazin_sne(
+            time,
+            aa,
+            bb,
+            0.0,  # t0
+            3.0,  # tau_rise
+            12.0,  # tau_fall
+        )
+        expected = jnp.array(
+            [
+                [5.0, 5.0, 5.0, 5.0],
+                [6.53599, 6.55451, 6.41963, 6.18864],
+                [8.07198, 8.10902, 7.83926, 7.37727],
             ]
         )
         assert jnp.allclose(result, expected, atol=1e-5)

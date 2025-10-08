@@ -3,6 +3,8 @@ from jax import jit
 
 import numpy as np
 
+from redback_jax.utils.citation_wrapper import citation_wrapper
+
 
 @jit  # Timing is ~10us slower than non-JAX version
 def smooth_exponential_powerlaw(time, a_1, tpeak, alpha_1, alpha_2, smoothing_factor):
@@ -143,3 +145,43 @@ def exp_rise_powerlaw_decline(t, t0, m_peak, tau_rise, alpha, t_peak, delta=0.5)
         return m_model.flatten()
     return m_model
 
+
+@citation_wrapper('https://ui.adsabs.harvard.edu/abs/2009A%26A...499..653B/abstract')
+@jit  # Timing is same as the non-JAX version
+def bazin_sne(time, aa, bb, t0, tau_rise, tau_fall, **kwargs):
+    """
+    Bazin function for CCSN light curves with vectorized inputs.
+
+    :param time: time array in arbitrary units
+    :param aa: array (or float) of normalisations, if array this is unique to each 'band'
+    :param bb: array (or float) of additive constants, if array this is unique to each 'band'
+    :param t0: start time
+    :param tau_rise: exponential rise time
+    :param tau_fall: exponential fall time
+    :return: matrix of flux values in units set by AA
+    """
+    # Convert inputs to JAX arrays
+    time = jnp.asarray(time)
+    aa = jnp.atleast_1d(jnp.asarray(aa))
+    bb = jnp.atleast_1d(jnp.asarray(bb))
+    
+    # Check if aa and bb have the same length
+    if aa.shape[0] != bb.shape[0]:
+        raise ValueError("Length of aa and bb must be the same.")
+    
+    # Reshape time for broadcasting: (n_times, 1)
+    time_col = time.reshape(-1, 1)
+    
+    # Reshape aa and bb for broadcasting: (1, n_bands)
+    aa_row = aa.reshape(1, -1)
+    bb_row = bb.reshape(1, -1)
+    
+    # Compute the Bazin function for all bands simultaneously
+    # Shape will be (n_times, n_bands)
+    flux_matrix = aa_row * (jnp.exp(-((time_col - t0) / tau_fall)) / 
+                           (1 + jnp.exp(-(time_col - t0) / tau_rise))) + bb_row
+    
+    # If original aa was scalar, return 1D array
+    if aa.shape[0] == 1:
+        return flux_matrix.flatten()
+    return flux_matrix.T  # Return shape (n_bands, n_times) to match original behavior
