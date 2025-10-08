@@ -10,4 +10,4 @@ __author__ = "Nikhil Sarin"
 __email__ = "nsarin.astro@gmail.com"
 
 # Core imports
-from .transient import Transient, Spectrum
+from .transient import Spectrum, Transient
