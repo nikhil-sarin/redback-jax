@@ -2,11 +2,12 @@
 Plotting utilities for redback-jax.
 """
 
-import matplotlib.pyplot as plt
-import matplotlib.axes
-import numpy as np
+from typing import Optional, Union
+
 import jax.numpy as jnp
-from typing import Union, Optional
+import matplotlib.axes
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 def setup_plot_style():

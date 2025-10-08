@@ -3,14 +3,15 @@ JAX-friendly transient classes for electromagnetic transient analysis.
 """
 
 from __future__ import annotations
-from typing import Union, Optional, Dict, Any
+
 import warnings
+from typing import Any, Dict, Optional, Union
 
 import jax.numpy as jnp
+import matplotlib.axes
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.axes
 
 
 class Spectrum:

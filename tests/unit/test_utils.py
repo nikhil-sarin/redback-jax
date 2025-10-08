@@ -3,6 +3,7 @@ Tests for redback_jax.utils module.
 """
 
 import pytest
+
 from redback_jax import utils
 
 

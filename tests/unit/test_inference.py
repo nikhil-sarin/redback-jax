@@ -3,6 +3,7 @@ Tests for redback_jax.inference module.
 """
 
 import pytest
+
 from redback_jax import inference
 
 

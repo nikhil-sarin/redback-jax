@@ -3,6 +3,7 @@ Tests for redback_jax.models module.
 """
 
 import pytest
+
 from redback_jax import models
 
 

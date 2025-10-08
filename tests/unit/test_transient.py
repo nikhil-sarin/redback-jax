@@ -2,12 +2,14 @@
 Tests for redback_jax.transient module.
 """
 
-import pytest
-import numpy as np
-import jax.numpy as jnp
-import tempfile
 import os
-from redback_jax.transient import Transient, Spectrum
+import tempfile
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from redback_jax.transient import Spectrum, Transient
 
 
 class TestSpectrum:

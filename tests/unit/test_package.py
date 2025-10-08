@@ -3,6 +3,7 @@ Basic tests for redback_jax package.
 """
 
 import pytest
+
 import redback_jax
 
 
@@ -26,7 +27,7 @@ def test_package_author():
 
 def test_submodules_importable():
     """Test that submodules can be imported."""
-    from redback_jax import models, utils, inference
+    from redback_jax import inference, models, utils
 
     assert models is not None
     assert utils is not None
