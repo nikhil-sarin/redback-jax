@@ -34,3 +34,40 @@ class TestPhenomenologicalModelsModule:
             5.0,  # smoothing_factor
         )
         assert jnp.allclose(result, jnp.array([0.50654, 1.54579, 1.74911, 1.16408, 0.87522]), atol=1e-5)
+
+
+    def test_exp_rise_powerlaw_decline(self):
+        """Test the exp_rise_powerlaw_decline function."""
+        time = [1.0, 5.0, 10.0, 20.0]
+        m_peak = [10.0, 15.0, 20.0]
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.exp_rise_powerlaw_decline(
+            time, 
+            0.0,  # t0
+            18.0,  # m_peak (single value)
+            3.0,  # tau_rise
+            1.5,  # alpha
+            8.0,  # t_peak
+            delta=0.25,
+        )
+        expected = jnp.array([20.52861, 18.99819, 18.23379, 19.49224])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        result = phenomenological_models.exp_rise_powerlaw_decline(
+            time, 
+            0.0,  # t0
+            m_peak,  # m_peak (array)
+            2.0,  # tau_rise
+            1.0,  # alpha
+            10.0,  # t_peak
+        )
+        expected = jnp.array(
+            [
+                [14.69053, 19.69053, 24.69053],
+                [12.30165, 17.30165, 22.30165],
+                [10.0, 15.0, 20.0],
+                [10.64137, 15.64137, 20.64137],
+            ]
+        )
+        assert jnp.allclose(result, expected, atol=1e-5)
