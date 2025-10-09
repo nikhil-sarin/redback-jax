@@ -185,3 +185,41 @@ def bazin_sne(time, aa, bb, t0, tau_rise, tau_fall, **kwargs):
     if aa.shape[0] == 1:
         return flux_matrix.flatten()
     return flux_matrix.T  # Return shape (n_bands, n_times) to match original behavior
+
+
+@citation_wrapper(
+    "https://ui.adsabs.harvard.edu/abs/2019ApJ...884...83V/abstract, https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract"
+)
+@jit  # Timing is ~30us slower than non-JAX version
+def villar_sne(time, aa, cc, t0, tau_rise, tau_fall, gamma, nu, **kwargs):
+    """
+    Villar function for SN light curves
+
+    :param time: time array in arbitrary units (must be monotonically increasing or constant)
+    :param aa: normalisation on the Villar function, amplitude
+    :param cc: additive constant, baseline flux
+    :param t0: "start" time
+    :param tau_rise: exponential rise time
+    :param tau_fall: exponential fall time
+    :param gamma: plateau duration
+    :param nu: related to beta and between 0 an 1; nu = -beta/gamma / A
+    :param kwargs:
+    :return: flux in units set by AA
+    """
+    # Ensure all inputs are JAX arrays
+    time = jnp.asarray(time)
+    aa = jnp.asarray(aa)
+    cc = jnp.asarray(cc)
+
+    # Mask (just mask1, as mask2 is the inverse)
+    mask1 = time < t0 + gamma
+
+    # Compute norm for all times
+    norm = cc + (aa / (1 + jnp.exp(-(time - t0) / tau_rise)))
+
+    # Compute both branches
+    flux1 = norm * (1 - (nu * ((time - t0) / gamma)))
+    flux2 = norm * ((1 - nu) * jnp.exp(-((time - t0 - gamma) / tau_fall)))
+
+    # Use jnp.where to select the correct branch for each time
+    return jnp.where(mask1, flux1, flux2)
