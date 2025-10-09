@@ -106,3 +106,53 @@ class TestPhenomenologicalModelsModule:
             ]
         )
         assert jnp.allclose(result, expected, atol=1e-5)
+
+    def test_villar_sne(self):
+        """Test the villar_sne function against orig_villar_sne output."""
+
+        # First test: scalar parameters, compare to ground truth from the non-JAX implementation.
+        time = jnp.array([1.0, 5.0, 10.0, 20.0])
+        aa = 1.0
+        cc = 2.0
+        t0 = 0.0
+        tau_rise = 4.0
+        tau_fall = 10.0
+        gamma = 1.0
+        nu = 0.5
+
+        result = phenomenological_models.villar_sne(
+            time,
+            aa,
+            cc,
+            t0,
+            tau_rise,
+            tau_fall,
+            gamma,
+            nu,
+        )
+        expected = jnp.array([1.28108825, 0.93083989, 0.59443367, 0.22385241])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        # Second test: array parameters, compare to ground truth from the non-JAX implementation.
+        time = jnp.array([0.0, 0.5, 1.0, 2.0, 5.0])
+        aa = jnp.array([2.0, 2.0, 2.0, 2.0, 2.0])
+        cc = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0])
+        t0 = 0.0
+        tau_rise = 2.0
+        tau_fall = 10.0
+        gamma = 1.0
+        nu = 0.5
+
+        # Compare against ground truth from the non-JAX implementation.
+        result = phenomenological_models.villar_sne(
+            time,
+            aa,
+            cc,
+            t0,
+            tau_rise,
+            tau_fall,
+            gamma,
+            nu,
+        )
+        expected = jnp.array([2.0, 1.59326475, 1.12245933, 1.11390787, 0.95463081])
+        assert jnp.allclose(result, expected, atol=1e-5)
