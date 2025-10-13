@@ -9,7 +9,7 @@ from redback_jax.constants import *
 
 
 @citation_wrapper("1994ApJS...92..527N")
-def _nickelcobalt_engine(time, f_nickel, mej, **kwargs):
+def _nickelcobalt_engine(time, f_nickel, mej):
     """Compute the bolometric luminosity from nickel and cobalt decay.
 
     :param time: time in days
