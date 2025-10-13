@@ -28,7 +28,7 @@ def diffusion_convert_luminosity(time, dense_times, luminosity, kappa, kappa_gam
     trap_coeff = (trapping_constant * kappa_gamma * mej / (vej ** 2)) / day_to_s ** 2
 
     min_te = jnp.min(dense_times)
-    tb = max(0.0, min_te)
+    tb = jnp.max(0.0, min_te)
     uniq_times = jnp.unique(time[(time >= tb) & (time <= dense_times[-1])])
     lu = len(uniq_times)
 
