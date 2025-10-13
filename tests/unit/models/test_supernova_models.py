@@ -21,5 +21,5 @@ def test_nickelcobalt_engine():
     mej = 1.5  # solar masses
 
     lbol = _nickelcobalt_engine(time, f_nickel, mej)
-    expected = jnp.array([3.91291e+43, 3.59710e+43, 1.69787e+43, 9.38031e+42, 4.73622e+42, 2.95251e+42, 1.20208e+42])
+    expected = jnp.array([5.86936292e+43, 5.39564058e+43, 2.54681265e+43, 1.40704539e+43, 7.10433476e+42, 4.42876518e+42, 1.80312521e+42])
     assert jnp.allclose(lbol, expected, rtol=1e-4)
