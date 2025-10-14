@@ -10,6 +10,20 @@ from redback_jax.constants import *
 from redback_jax.interaction_processes import diffusion_convert_luminosity
 
 
+def calc_kcorrected_properties(frequency, redshift, time):
+    """
+    Perform k-correction
+
+    :param frequency: observer frame frequency
+    :param redshift: source redshift
+    :param time: observer frame time
+    :return: k-corrected frequency and source frame time
+    """
+    time = time / (1 + redshift)
+    frequency = frequency * (1 + redshift)
+    return frequency, time
+
+
 @citation_wrapper("1994ApJS...92..527N")
 @jit
 def _nickelcobalt_engine(time, f_nickel, mej):
@@ -35,7 +49,11 @@ def arnett_bolometric(
     time,
     f_nickel,
     mej,
-    interaction_process=diffusion_convert_luminosity,
+    *,
+    interaction_process="diffusion",
+    vej=None,
+    kappa=None,
+    kappa_gamma=None,
     dense_resolution=1000,
     **kwargs,
 ):
@@ -43,24 +61,29 @@ def arnett_bolometric(
     :param time: time in days
     :param f_nickel: fraction of nickel mass
     :param mej: total ejecta mass in solar masses
-    :param kwargs: Must be all the kwargs required by the specific interaction_process
-    :param interaction_process: Function pointer to the interaction process to apply.
-        Default is diffusion_convert_luminosity. Output can be None to return raw luminosity.
+    :param kappa: opacity (required if interaction_process is not None)
+    :param kappa_gamma: gamma-ray opacity (required if interaction_process is not None)
+    :param vej: ejecta velocity in km/s (required if interaction_process is not None)
     :param dense_resolution: Number of points to use in the dense time array if 
         interaction_process is not None
+    :param interaction_process: Function pointer to the interaction process to apply.
+        Default is diffusion_convert_luminosity. Output can be None to return raw luminosity.
+
     :param kwargs: Must be all the kwargs required by the specific interaction_process.
     :return: bolometric_luminosity in erg/s
     """
     lbol = _nickelcobalt_engine(time=time, f_nickel=f_nickel, mej=mej)
-    if interaction_process is not None:
+    if interaction_process == "diffusion":
         dense_times = jnp.linspace(0, time[-1]+100, dense_resolution)
         dense_lbols = _nickelcobalt_engine(time=dense_times, f_nickel=f_nickel, mej=mej)
-        _, new_luminosity = interaction_process(
+        _, new_luminosity = diffusion_convert_luminosity(
             time=time,
             dense_times=dense_times,
             luminosity=dense_lbols,
             mej=mej,
-            **kwargs,
+            kappa=kappa,
+            kappa_gamma=kappa_gamma,
+            vej=vej,
         )
         lbol = new_luminosity
     return lbol
