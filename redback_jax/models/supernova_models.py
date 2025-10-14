@@ -5,23 +5,36 @@ JAX-friendly classes for supernova modeling.
 from jax import jit
 import jax.numpy as jnp
 
+from wcosmo import wcosmo
+
 from redback_jax.utils.citation_wrapper import citation_wrapper
 from redback_jax.constants import *
+from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import diffusion_convert_luminosity
+from redback_jax.photosphere import compute_temperature_floor
 
 
-def calc_kcorrected_properties(frequency, redshift, time):
+def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     """
-    Perform k-correction
+    A general blackbody_to_flux_density formula
 
-    :param frequency: observer frame frequency
-    :param redshift: source redshift
-    :param time: observer frame time
-    :return: k-corrected frequency and source frame time
+    :param temperature: effective temperature in kelvin
+    :param r_photosphere: photosphere radius in cm
+    :param dl: luminosity_distance in cm
+    :param frequency: frequency to calculate in Hz - Must be same length as time array or a single number.
+                      In source frame
+    :return: flux_density in erg/s/Hz/cm^2
     """
-    time = time / (1 + redshift)
-    frequency = frequency * (1 + redshift)
-    return frequency, time
+    radius = r_photosphere
+    temperature = temperature
+    planck = cc.h.cgs.value
+    speed_of_light = cc.c.cgs.value
+    boltzmann_constant = cc.k_B.cgs.value
+    num = 2 * jnp.pi * planck * frequency ** 3 * radius ** 2
+    denom = dl ** 2 * speed_of_light ** 2
+    frac = 1. / (jnp.expm1((planck * frequency) / (boltzmann_constant * temperature)))
+    flux_density = num / denom * frac
+    return flux_density
 
 
 @citation_wrapper("1994ApJS...92..527N")
@@ -55,7 +68,6 @@ def arnett_bolometric(
     kappa=None,
     kappa_gamma=None,
     dense_resolution=1000,
-    **kwargs,
 ):
     """
     :param time: time in days
@@ -66,10 +78,8 @@ def arnett_bolometric(
     :param vej: ejecta velocity in km/s (required if interaction_process is not None)
     :param dense_resolution: Number of points to use in the dense time array if 
         interaction_process is not None
-    :param interaction_process: Function pointer to the interaction process to apply.
-        Default is diffusion_convert_luminosity. Output can be None to return raw luminosity.
-
-    :param kwargs: Must be all the kwargs required by the specific interaction_process.
+    :param interaction_process: Name of the interaction process to apply (as a string).
+        Default is diffusion. Output can be None to return raw luminosity.
     :return: bolometric_luminosity in erg/s
     """
     lbol = _nickelcobalt_engine(time=time, f_nickel=f_nickel, mej=mej)

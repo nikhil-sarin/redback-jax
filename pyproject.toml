@@ -27,13 +27,14 @@ classifiers = [
 keywords = ["astronomy", "astrophysics", "transients", "bayesian", "jax"]
 requires-python = ">=3.12"
 dependencies = [
+    "astropy>=4.0.0",
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
-    "numpy>=1.20.0",
-    "scipy>=1.7.0",
-    "pandas>=1.3.0",
     "matplotlib>=3.5.0",
-    "astropy>=4.0.0",
+    "numpy>=1.20.0",
+    "pandas>=1.3.0",
+    "scipy>=1.7.0",
+    "unxt",
 ]
 
 [project.optional-dependencies]
