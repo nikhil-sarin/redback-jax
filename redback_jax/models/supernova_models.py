@@ -65,7 +65,7 @@ def arnett_bolometric(
     f_nickel,
     mej,
     *,
-    apply_diffusion=True,
+    interaction_process="diffusion",
     vej=None,
     kappa=None,
     kappa_gamma=None,
@@ -74,21 +74,22 @@ def arnett_bolometric(
     """
     Compute the bolometric luminosity using the Arnett model.
 
-    When JIT compiling, set apply_diffusion and dense_resolution as static arguments.
+    When JIT compiling, set interaction_process and dense_resolution as static arguments.
 
     :param time: time in days
     :param f_nickel: fraction of nickel mass
     :param mej: total ejecta mass in solar masses
-    :param kappa: opacity (required if apply_diffusion is True)
-    :param kappa_gamma: gamma-ray opacity (required if apply_diffusion is True)
-    :param vej: ejecta velocity in km/s (required if apply_diffusion is True)
-    :param dense_resolution: Number of points to use in the dense time array if 
-        apply_diffusion is True
-    :param apply_diffusion: True if diffusion interaction process should be applied.
+    :param kappa: opacity (required if interaction_process is "diffusion")
+    :param kappa_gamma: gamma-ray opacity (required if interaction_process is "diffusion")
+    :param vej: ejecta velocity in km/s (required if interaction_process is "diffusion")
+    :param dense_resolution: Number of points to use in the dense time array if
+        interaction_process is "diffusion"
+    :param interaction_process: Interaction process to apply. If None then no interaction
+        process is applied. Currently only "diffusion" is supported.
     :return: bolometric_luminosity in erg/s
     """
     lbol = _nickelcobalt_engine(time=time, f_nickel=f_nickel, mej=mej)
-    if apply_diffusion:
+    if interaction_process == "diffusion":
         dense_times = jnp.linspace(0, time[-1]+100, dense_resolution)
         dense_lbols = _nickelcobalt_engine(time=dense_times, f_nickel=f_nickel, mej=mej)
         _, new_luminosity = diffusion_convert_luminosity(
@@ -101,11 +102,13 @@ def arnett_bolometric(
             vej=vej,
         )
         lbol = new_luminosity
+    elif interaction_process is not None:
+        raise ValueError(f"Unsupported interaction_process: {interaction_process}")
     return lbol
 
 # We compile the arnett_bolometric function with JIT, specifying static arguments.
 # Changing these will require recompilation.
-arnett_bolometric_jit = jit(arnett_bolometric, static_argnames=('apply_diffusion', 'dense_resolution'))
+arnett_bolometric_jit = jit(arnett_bolometric, static_argnames=('interaction_process', 'dense_resolution'))
 
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
@@ -117,7 +120,7 @@ def arnett_model(
     redshift=0.0,
     cosmo_H0=None,
     cosmo_Om0=None,
-    apply_diffusion=True,
+    interaction_process="diffusion",
     vej=None,
     kappa=None,
     kappa_gamma=None,
@@ -136,10 +139,10 @@ def arnett_model(
     :param redshift: source redshift
     :param cosmo_H0: Hubble constant to use for luminosity distance calculation.
     :param cosmo_Om0: Matter density to use for luminosity distance calculation.
-    :param apply_diffusion: True if diffusion interaction process should be applied.
-    :param kappa: opacity (required if apply_diffusion is True)
-    :param kappa_gamma: gamma-ray opacity (required if apply_diffusion is True)
-    :param vej: ejecta velocity in km/s (required if apply_diffusion is True)
+    :param interaction_process: Interaction process to apply. If None then no interaction
+    :param kappa: opacity (required if interaction_process is "diffusion")
+    :param kappa_gamma: gamma-ray opacity (required if interaction_process is "diffusion")
+    :param vej: ejecta velocity in km/s (required if interaction_process is "diffusion")
     :param temperature_floor: Floor temperature in kelvin (required if photosphere is temperature_floor)
     :param output_format: 'magnitude', 'spectra', 'flux'
     :param bands: Required if output_format is 'magnitude' or 'flux'.
@@ -163,7 +166,7 @@ def arnett_model(
         time=time,
         f_nickel=f_nickel,
         mej=mej,
-        apply_diffusion=apply_diffusion,
+        interaction_process=interaction_process,
         vej=vej,
         kappa=kappa,
         kappa_gamma=kappa_gamma,
@@ -203,5 +206,5 @@ def arnett_model(
         raise ValueError(f"Unknown output_format: {output_format}")
 
 # JIT-compiled version of arnett_model with static arguments
-# Changing apply_diffusion or output_format will require recompilation
-arnett_model_jit = jit(arnett_model, static_argnames=('apply_diffusion', 'output_format'))
+# Changing interaction_process or output_format will require recompilation
+arnett_model_jit = jit(arnett_model, static_argnames=('interaction_process', 'output_format'))
