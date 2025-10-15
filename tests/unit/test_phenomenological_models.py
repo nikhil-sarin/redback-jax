@@ -1,0 +1,158 @@
+"""
+Tests for redback_jax.phenomenological_models module.
+"""
+import jax.numpy as jnp
+
+from redback_jax import phenomenological_models
+
+
+class TestPhenomenologicalModelsModule:
+    """Test class for phenomenological_models module functionality."""
+
+    def test_smooth_exponential_powerlaw(self):
+        """Test the smooth_exponential_powerlaw function."""
+        time = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.smooth_exponential_powerlaw(
+            time, 
+            1.0,  # a_1
+            3.0,  # tpeak
+            2.0,  # alpha_1
+            -1.0,  # alpha_2
+            1.0,  # smoothing_factor
+        )
+        assert jnp.allclose(result, jnp.array([0.4, 0.76923077, 1.0, 1.12, 1.17647059]), atol=1e-5)
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.smooth_exponential_powerlaw(
+            time, 
+            2.0,  # a_1
+            2.5,  # tpeak
+            1.5,  # alpha_1
+            -1.2,  # alpha_2
+            5.0,  # smoothing_factor
+        )
+        assert jnp.allclose(result, jnp.array([0.50654, 1.54579, 1.74911, 1.16408, 0.87522]), atol=1e-5)
+
+    def test_exp_rise_powerlaw_decline(self):
+        """Test the exp_rise_powerlaw_decline function."""
+        time = [1.0, 5.0, 10.0, 20.0]
+        m_peak = [10.0, 15.0, 20.0]
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.exp_rise_powerlaw_decline(
+            time, 
+            0.0,  # t0
+            18.0,  # m_peak (single value)
+            3.0,  # tau_rise
+            1.5,  # alpha
+            8.0,  # t_peak
+            delta=0.25,
+        )
+        expected = jnp.array([20.52861, 18.99819, 18.23379, 19.49224])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        result = phenomenological_models.exp_rise_powerlaw_decline(
+            time, 
+            0.0,  # t0
+            m_peak,  # m_peak (array)
+            2.0,  # tau_rise
+            1.0,  # alpha
+            10.0,  # t_peak
+        )
+        expected = jnp.array(
+            [
+                [14.69053, 19.69053, 24.69053],
+                [12.30165, 17.30165, 22.30165],
+                [10.0, 15.0, 20.0],
+                [10.64137, 15.64137, 20.64137],
+            ]
+        )
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+    def test_bazin_sne(self):
+        """Test the bazin_sne function."""
+        time = [1.0, 5.0, 10.0, 20.0]
+
+        # Test a few different settings against ground truth from the non-JAX implementation.
+        result = phenomenological_models.bazin_sne(
+            time,
+            1.0,  # aa normalization
+            2.0,  # bb additive constant
+            0.0,  # t0
+            4.0,  # tau_rise
+            10.0,  # tau_fall
+        )
+        expected = jnp.array([2.50867833, 2.4714562 , 2.33997278, 2.1344295 ])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        aa = jnp.array([0.0, 1.0, 2.0])
+        bb = jnp.array([5.0, 6.0, 7.0])
+
+        result = phenomenological_models.bazin_sne(
+            time,
+            aa,
+            bb,
+            0.0,  # t0
+            3.0,  # tau_rise
+            12.0,  # tau_fall
+        )
+        expected = jnp.array(
+            [
+                [5.0, 5.0, 5.0, 5.0],
+                [6.53599, 6.55451, 6.41963, 6.18864],
+                [8.07198, 8.10902, 7.83926, 7.37727],
+            ]
+        )
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+    def test_villar_sne(self):
+        """Test the villar_sne function against orig_villar_sne output."""
+
+        # First test: scalar parameters, compare to ground truth from the non-JAX implementation.
+        time = jnp.array([1.0, 5.0, 10.0, 20.0])
+        aa = 1.0
+        cc = 2.0
+        t0 = 0.0
+        tau_rise = 4.0
+        tau_fall = 10.0
+        gamma = 1.0
+        nu = 0.5
+
+        result = phenomenological_models.villar_sne(
+            time,
+            aa,
+            cc,
+            t0,
+            tau_rise,
+            tau_fall,
+            gamma,
+            nu,
+        )
+        expected = jnp.array([1.28108825, 0.93083989, 0.59443367, 0.22385241])
+        assert jnp.allclose(result, expected, atol=1e-5)
+
+        # Second test: array parameters, compare to ground truth from the non-JAX implementation.
+        time = jnp.array([0.0, 0.5, 1.0, 2.0, 5.0])
+        aa = jnp.array([2.0, 2.0, 2.0, 2.0, 2.0])
+        cc = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0])
+        t0 = 0.0
+        tau_rise = 2.0
+        tau_fall = 10.0
+        gamma = 1.0
+        nu = 0.5
+
+        # Compare against ground truth from the non-JAX implementation.
+        result = phenomenological_models.villar_sne(
+            time,
+            aa,
+            cc,
+            t0,
+            tau_rise,
+            tau_fall,
+            gamma,
+            nu,
+        )
+        expected = jnp.array([2.0, 1.59326475, 1.12245933, 1.11390787, 0.95463081])
+        assert jnp.allclose(result, expected, atol=1e-5)
