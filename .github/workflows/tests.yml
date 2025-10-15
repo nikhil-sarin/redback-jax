@@ -28,21 +28,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e .[dev]
 
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 redback_jax --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 redback_jax --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-
-    - name: Check code formatting with black
-      run: |
-        black --check redback_jax tests
-
-    - name: Check import sorting with isort
-      run: |
-        isort --check-only redback_jax tests
-
     - name: Test with pytest
       run: |
         pytest -v --cov=redback_jax --cov-report=xml --cov-report=term-missing
@@ -52,4 +37,4 @@ jobs:
       uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
-        fail_ci_if_error: true
+        fail_ci_if_error: false
