@@ -15,6 +15,10 @@ from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import diffusion_convert_luminosity
 from redback_jax.photosphere import compute_temperature_floor
 
+# Planck18 cosmology defaults
+PLANCK18_H0 = 67.66  # km/s/Mpc
+PLANCK18_OM0 = 0.3111
+
 
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     """
@@ -118,8 +122,8 @@ def arnett_model(
     mej,
     *,
     redshift=0.0,
-    cosmo_H0=None,
-    cosmo_Om0=None,
+    cosmo_H0=PLANCK18_H0,
+    cosmo_Om0=PLANCK18_OM0,
     interaction_process="diffusion",
     vej=None,
     kappa=None,
