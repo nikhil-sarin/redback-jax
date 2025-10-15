@@ -9,5 +9,8 @@ __version__ = "0.1.0"
 __author__ = "Nikhil Sarin"
 __email__ = "nsarin.astro@gmail.com"
 
+import jax
+jax.config.update("jax_enable_x64", True)
+
 # Core imports
 from .transient import Transient, Spectrum
