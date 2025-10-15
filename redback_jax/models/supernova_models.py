@@ -2,12 +2,12 @@
 JAX-friendly classes for supernova modeling.
 """
 
-import unxt as uu
-
 from jax import jit
 import jax.numpy as jnp
-
 from wcosmo import wcosmo
+
+from collections import namedtuple
+
 
 from redback_jax.utils.citation_wrapper import citation_wrapper
 from redback_jax.constants import *
@@ -72,6 +72,10 @@ def arnett_bolometric(
     dense_resolution=1000,
 ):
     """
+    Compute the bolometric luminosity using the Arnett model.
+
+    When JIT compiling, set apply_diffusion and dense_resolution as static arguments.
+
     :param time: time in days
     :param f_nickel: fraction of nickel mass
     :param mej: total ejecta mass in solar masses
@@ -123,6 +127,8 @@ def arnett_model(
     """
     A version of the arnett model where SED has time-evolving spectral features.
 
+    When JIT compiling, set apply_diffusion and output_format as static arguments.
+
     :param time: time in days
     :param redshift: source redshift
     :param f_nickel: fraction of nickel mass
@@ -140,9 +146,10 @@ def arnett_model(
 
     :return: set by output format - 'magnitude', 'spectra', 'flux'
     """
-    dl = wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0)
-    
-    time_obs = time
+    # Wcosmo returns in Mpc (though it is marked as km/s), so we need to
+    # correct the units and convert to cm.
+    dl = wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * Mpc_to_cm
+
     lambda_observer_frame = jnp.geomspace(100, 60000, 100)
     time_temp = jnp.geomspace(0.1, 3000, 3000)  # in days
     time_observer_frame = time_temp * (1. + redshift)
@@ -152,7 +159,7 @@ def arnett_model(
         time=time_observer_frame
     )
 
-    lbol = arnett_bolometric_jit(
+    lbol = arnett_bolometric(
         time=time,
         f_nickel=f_nickel,
         mej=mej,
@@ -170,14 +177,31 @@ def arnett_model(
         temperature_floor=temperature_floor,
     )
 
-    # Use the blackbody SED.
-    fmjy = blackbody_to_flux_density(
+    # Use the blackbody spectral flux density. Result is in erg/s/Hz/cm^2.
+    spectral_flux_density = blackbody_to_flux_density(
         temperature=photo_temp,
         r_photosphere=r_photo,
         dl=dl,
         frequency=frequency[:, None],
     ).T
 
-    #equivalencies = uu.spectral_density(frequency * uu.Hz, wav=lambda_observer_frame * uu.Angstrom)
-    #spectra = fmjy.to(uu.mJy).to(uu.erg / uu.cm ** 2 / uu.s / uu.Angstrom, equivalencies=equivalencies)
-    #return spectra
+    # Convert erg/s/Hz/cm^2 to erg/cm^2/s/Angstrom using 2.998e18 for the
+    # speed of light in Angstrom/s. We define this numerically to be JAX-friendly.
+    spectra = spectral_flux_density * 2.998e18 / (lambda_observer_frame[None, :] ** 2)
+
+    if output_format == "spectra":
+        return namedtuple('output', ['time', 'lambdas', 'spectra'])(
+            time=time_observer_frame,
+            lambdas=lambda_observer_frame,
+            spectra=spectra
+        )
+    elif output_format == "magnitude":
+        raise NotImplementedError("Magnitude output not yet implemented.")
+    elif output_format == "flux":
+        raise NotImplementedError("Flux output not yet implemented.")
+    else:
+        raise ValueError(f"Unknown output_format: {output_format}")
+
+# JIT-compiled version of arnett_model with static arguments
+# Changing apply_diffusion or output_format will require recompilation
+arnett_model_jit = jit(arnett_model, static_argnames=('apply_diffusion', 'output_format'))

@@ -14,6 +14,7 @@ sigma_T = cc.sigma_T.cgs.value
 radiation_constant = sigma_sb*4 / speed_of_light
 boltzmann_constant = cc.k_B.cgs.value
 km_cgs = uu.km.cgs.scale
+Mpc_to_cm = uu.Mpc.cgs.scale
 day_to_s = 86400
 au_cgs = uu.au.cgs.scale
 solar_radius = cc.R_sun.cgs.value
