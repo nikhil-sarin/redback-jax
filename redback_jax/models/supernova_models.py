@@ -107,14 +107,12 @@ def arnett_bolometric(
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
 @jit
-def arnett_model(
-    time,
+def arnett_model_lum_dist(
     f_nickel,
     mej,
     *,
     redshift=0.0,
-    cosmo_H0=PLANCK18_H0,
-    cosmo_Om0=PLANCK18_OM0,
+    lum_dist=None,
     vej=None,
     kappa=None,
     kappa_gamma=None,
@@ -123,24 +121,18 @@ def arnett_model(
     """
     A version of the arnett model where SED has time-evolving spectral features.
 
-    :param time: time in days
     :param redshift: source redshift
     :param f_nickel: fraction of nickel mass
     :param mej: total ejecta mass in solar masses
     :param redshift: source redshift
-    :param cosmo_H0: Hubble constant to use for luminosity distance calculation.
-    :param cosmo_Om0: Matter density to use for luminosity distance calculation.
+    :param lum_dist: luminosity distance in cm
     :param kappa: opacity (required)
     :param kappa_gamma: gamma-ray opacity (required)
     :param vej: ejecta velocity in km/s (required)
     :param temperature_floor: Floor temperature in kelvin (required if photosphere is temperature_floor)
 
-    :return: The spectra output.
+    :return: A named tuple of three arrays: time (in days), lambdas (in Angstrom), and spectra
     """
-    # Wcosmo returns in Mpc (though it is marked as km/s), so we need to
-    # correct the units and convert to cm.
-    dl = wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * Mpc_to_cm
-
     lambda_observer_frame = jnp.geomspace(100, 60000, 100)
     time_temp = jnp.geomspace(0.1, 3000, 3000)  # in days
     time_observer_frame = time_temp * (1. + redshift)
@@ -171,7 +163,7 @@ def arnett_model(
     spectral_flux_density = blackbody_to_flux_density(
         temperature=photo_temp,
         r_photosphere=r_photo,
-        dl=dl,
+        dl=lum_dist,
         frequency=frequency[:, None],
     ).T
 
@@ -182,4 +174,50 @@ def arnett_model(
         time=time_observer_frame,
         lambdas=lambda_observer_frame,
         spectra=spectra
+    )
+
+
+@citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
+@jit
+def arnett_model_cosmology(
+    f_nickel,
+    mej,
+    *,
+    redshift=0.0,
+    cosmo_H0=PLANCK18_H0,
+    cosmo_Om0=PLANCK18_OM0,
+    vej=None,
+    kappa=None,
+    kappa_gamma=None,
+    temperature_floor=None,
+):
+    """
+    A version of the arnett model where SED has time-evolving spectral features.
+
+    :param redshift: source redshift
+    :param f_nickel: fraction of nickel mass
+    :param mej: total ejecta mass in solar masses
+    :param redshift: source redshift
+    :param cosmo_H0: Hubble constant to use for luminosity distance calculation.
+    :param cosmo_Om0: Matter density to use for luminosity distance calculation.
+    :param kappa: opacity (required)
+    :param kappa_gamma: gamma-ray opacity (required)
+    :param vej: ejecta velocity in km/s (required)
+    :param temperature_floor: Floor temperature in kelvin (required if photosphere is temperature_floor)
+
+    :return: A named tuple of three arrays: time (in days), lambdas (in Angstrom), and spectra
+    """
+    # Wcosmo returns in Mpc (though it is marked as km/s), so we need to
+    # correct the units and convert to cm.
+    dl = wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * Mpc_to_cm
+    print(dl)
+    return arnett_model_lum_dist(
+        f_nickel=f_nickel,
+        mej=mej,
+        redshift=redshift,
+        lum_dist=dl,
+        vej=vej,
+        kappa=kappa,
+        kappa_gamma=kappa_gamma,
+        temperature_floor=temperature_floor,
     )
