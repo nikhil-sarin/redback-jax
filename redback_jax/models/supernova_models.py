@@ -15,6 +15,10 @@ from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import diffusion_convert_luminosity
 from redback_jax.photosphere import compute_temperature_floor
 
+# Planck18 cosmology defaults
+PLANCK18_H0 = 67.66  # km/s/Mpc
+PLANCK18_OM0 = 0.3111
+
 
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     """
@@ -102,7 +106,7 @@ def arnett_bolometric(
             vej=vej,
         )
         lbol = new_luminosity
-    else:
+    elif interaction_process is not None:
         raise ValueError(f"Unsupported interaction_process: {interaction_process}")
     return lbol
 
@@ -118,8 +122,8 @@ def arnett_model(
     mej,
     *,
     redshift=0.0,
-    cosmo_H0=67.66,  # Planck 2018 value
-    cosmo_Om0=0.30966,
+    cosmo_H0=PLANCK18_H0,
+    cosmo_Om0=PLANCK18_OM0,
     interaction_process="diffusion",
     vej=None,
     kappa=None,
@@ -130,7 +134,7 @@ def arnett_model(
     """
     A version of the arnett model where SED has time-evolving spectral features.
 
-    When JIT compiling, set interaction_process and output_format as static arguments.
+    When JIT compiling, set apply_diffusion and output_format as static arguments.
 
     :param time: time in days
     :param redshift: source redshift

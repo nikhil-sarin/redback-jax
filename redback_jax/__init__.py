@@ -14,3 +14,4 @@ jax.config.update("jax_enable_x64", True)
 
 # Core imports
 from .transient import Transient, Spectrum
+from .sources import PrecomputedSpectraSource
