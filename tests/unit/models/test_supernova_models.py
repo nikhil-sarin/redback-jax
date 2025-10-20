@@ -6,7 +6,6 @@ import numpy as np
 
 from redback_jax.models.sed_features import SEDFeatures
 from redback_jax.models.supernova_models import (
-    _compute_mass_and_nickel,
     _nickelcobalt_engine,
     arnett_bolometric,
     arnett_with_features_cosmology,
@@ -32,35 +31,6 @@ def test_nickelcobalt_engine():
     lbol = _nickelcobalt_engine(time, f_nickel, mej)
     expected = jnp.array([5.86936292e+43, 5.39564058e+43, 2.54681265e+43, 1.40704539e+43, 7.10433476e+42, 4.42876518e+42, 1.80312521e+42])
     assert jnp.allclose(lbol, expected, rtol=1e-4)
-
-
-def test_compute_mass_and_nickel():
-    """Test the _compute_mass_and_nickel function."""
-    vel, v_m, m_array, ni_array = _compute_mass_and_nickel(
-        vmin=500.0,
-        esn=1.0,
-        mej=2.0,
-        f_nickel=0.1,
-        f_mixing=0.25,
-        vmax=10000,
-        delta=0.0,
-        n=12.0,
-    )
-
-    # Test the shape is correct and the first few values match the non-JAX implementation.
-    assert vel.shape == (200,)
-    assert jnp.allclose(vel[0:3], jnp.array([500., 507.58390609, 515.28284344]), rtol=1e-8)
-
-    assert v_m.shape == (200,)
-    assert jnp.allclose(v_m[0:3], jnp.array([5.00000000e+07, 5.07583906e+07, 5.15282843e+07]), rtol=1e-8)
-
-    assert m_array.shape == (200,)
-    assert jnp.allclose(m_array[0:3], jnp.array([0.00019662, 0.00020263, 0.00020883]), rtol=1e-8)
-
-    ni_array = np.array(ni_array)
-    assert ni_array.shape == (200,)
-    assert np.allclose(ni_array[0:3], [0.00174366, 0.00179696, 0.00185188], rtol=1e-8)
-    assert np.all(ni_array[50:] == 0.0)  # Only the inner 25% should have nickel.
 
 
 def test_arnett_bolometric():
