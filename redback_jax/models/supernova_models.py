@@ -13,6 +13,7 @@ from redback_jax.utils.citation_wrapper import citation_wrapper
 from redback_jax.constants import *
 from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import diffusion_convert_luminosity
+from redback_jax.models.sed_features import NO_SED_FEATURES, apply_sed_feature
 from redback_jax.photosphere import compute_temperature_floor
 
 
@@ -107,7 +108,7 @@ def arnett_bolometric(
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
 @jit
-def arnett_model_lum_dist(
+def arnett_with_features_lum_dist(
     f_nickel,
     mej,
     *,
@@ -117,6 +118,7 @@ def arnett_model_lum_dist(
     kappa=None,
     kappa_gamma=None,
     temperature_floor=None,
+    features=NO_SED_FEATURES,
 ):
     """
     A version of the arnett model where SED has time-evolving spectral features.
@@ -130,6 +132,7 @@ def arnett_model_lum_dist(
     :param kappa_gamma: gamma-ray opacity (required)
     :param vej: ejecta velocity in km/s (required)
     :param temperature_floor: Floor temperature in kelvin (required if photosphere is temperature_floor)
+    :param features: SEDFeatures object with the spectral features to add.
 
     :return: A named tuple of three arrays: time (in days), lambdas (in Angstrom), and spectra
     """
@@ -167,6 +170,9 @@ def arnett_model_lum_dist(
         frequency=frequency[:, None],
     ).T
 
+    # Apply any spectral features (this is a no-op if not features are given).
+    spectral_flux_density = apply_sed_feature(features, spectral_flux_density, frequency, time)
+
     # Convert erg/s/Hz/cm^2 to erg/cm^2/s/Angstrom using 2.998e18 for the
     # speed of light in Angstrom/s. We define this numerically to be JAX-friendly.
     spectra = spectral_flux_density * 2.998e18 / (lambda_observer_frame[None, :] ** 2)
@@ -179,7 +185,7 @@ def arnett_model_lum_dist(
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
 @jit
-def arnett_model_cosmology(
+def arnett_with_features_cosmology(
     f_nickel,
     mej,
     *,
@@ -190,6 +196,7 @@ def arnett_model_cosmology(
     kappa=None,
     kappa_gamma=None,
     temperature_floor=None,
+    features=NO_SED_FEATURES,
 ):
     """
     A version of the arnett model where SED has time-evolving spectral features.
@@ -204,14 +211,14 @@ def arnett_model_cosmology(
     :param kappa_gamma: gamma-ray opacity (required)
     :param vej: ejecta velocity in km/s (required)
     :param temperature_floor: Floor temperature in kelvin (required if photosphere is temperature_floor)
+    :param features: SEDFeatures object with the spectral features to add.
 
     :return: A named tuple of three arrays: time (in days), lambdas (in Angstrom), and spectra
     """
     # Wcosmo returns in Mpc (though it is marked as km/s), so we need to
     # correct the units and convert to cm.
     dl = wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * Mpc_to_cm
-    print(dl)
-    return arnett_model_lum_dist(
+    return arnett_with_features_lum_dist(
         f_nickel=f_nickel,
         mej=mej,
         redshift=redshift,
@@ -220,4 +227,5 @@ def arnett_model_cosmology(
         kappa=kappa,
         kappa_gamma=kappa_gamma,
         temperature_floor=temperature_floor,
+        features=features,
     )

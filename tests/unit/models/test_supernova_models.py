@@ -2,12 +2,14 @@
 Tests for redback_jax.models.supernova_models module.
 """
 import jax.numpy as jnp
+import numpy as np
 
+from redback_jax.models.sed_features import SEDFeatures
 from redback_jax.models.supernova_models import (
     _nickelcobalt_engine,
     arnett_bolometric,
-    arnett_model_cosmology,
-    arnett_model_lum_dist,
+    arnett_with_features_cosmology,
+    arnett_with_features_lum_dist,
     PLANCK18_H0,
     PLANCK18_OM0,
 )
@@ -59,7 +61,7 @@ def test_arnett_models():
     f_nickel = 0.1  # fraction of nickel mass
     mej = 1.0  # solar masses
 
-    val_cosmo = arnett_model_cosmology(
+    val_cosmo = arnett_with_features_cosmology(
         f_nickel,
         mej,
         redshift=0.1,
@@ -80,7 +82,7 @@ def test_arnett_models():
         assert jnp.all(jnp.diff(val_cosmo.spectra[i, :max_t]) >= 0)
         assert jnp.all(jnp.diff(val_cosmo.spectra[i, max_t:]) <= 0)
 
-    val_dl = arnett_model_lum_dist(
+    val_dl = arnett_with_features_lum_dist(
         f_nickel,
         mej,
         redshift=0.1,
@@ -97,3 +99,45 @@ def test_arnett_models():
     assert jnp.allclose(val_cosmo.time, val_dl.time, rtol=1e-5)
     assert jnp.allclose(val_cosmo.lambdas, val_dl.lambdas, rtol=1e-5)
     assert jnp.allclose(val_cosmo.spectra, val_dl.spectra, rtol=1e-5)
+
+
+def test_arnett_with_features():
+    """Test the arnett model with features."""
+    f_nickel = 0.1  # fraction of nickel mass
+    mej = 1.0  # solar masses
+
+    # Compute a reference without features.
+    val_no_features = arnett_with_features_lum_dist(
+        f_nickel,
+        mej,
+        redshift=0.0,
+        lum_dist=1.4684007701387617e+27,  # cm
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        temperature_floor=1000,
+    )
+
+    features = SEDFeatures(
+        rest_wavelengths=jnp.array([5000.0, 6000.0]),
+        sigmas=jnp.array([1000.0, 2000.0]),
+        amplitudes=jnp.array([100.0, 200.0]),
+        t_starts=jnp.array([0.0, 100.0]),
+        t_ends=jnp.array([1000.0, 2000.0]),
+    )
+    val_features = arnett_with_features_lum_dist(
+        f_nickel,
+        mej,
+        redshift=0.0,
+        lum_dist=1.4684007701387617e+27,  # cm
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        temperature_floor=1000,
+        features=features,
+    )
+
+    # Check that the features have modified the output of the spectra only.
+    assert jnp.allclose(val_no_features.time, val_features.time, rtol=1e-5)
+    assert jnp.allclose(val_no_features.lambdas, val_features.lambdas, rtol=1e-5)
+    assert not jnp.allclose(val_no_features.spectra, val_features.spectra, rtol=1e-5, atol=1e-20)
