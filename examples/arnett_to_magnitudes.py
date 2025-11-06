@@ -28,23 +28,30 @@ def main():
         vej=5000,
         kappa=0.07,
         kappa_gamma=0.1,
-        temperature_floor=5000,
+        temperature_floor=2000,
         redshift=0.01,
         time_min=0.1,
         time_max=50.0,
-        n_times=100
+        n_times=1000
     )
-    print(f"  Source created with {len(source.times)} time points")
-    print(f"  Time range: {source.times[0]:.1f} - {source.times[-1]:.1f} days")
+    print(f"  Source created with {len(source.phases)} time points")
+    print(f"  Time range: {source.phases[0]:.1f} - {source.phases[-1]:.1f} days")
     print(f"  Wavelength range: {source.wavelengths[0]:.1f} - {source.wavelengths[-1]:.1f} Å")
     print()
 
-    # Calculate multi-band light curves
+    # Calculate multi-band light curves using new functional API
     print("Calculating multi-band magnitudes...")
     phases = jnp.linspace(5, 50, 50)
     bands = ['bessellb', 'bessellv', 'bessellr', 'besselli']
 
-    lightcurves = source.bandmag_multi(bands, phases)
+    # Define amplitude parameter (1.0 = use model as-is)
+    params = {'amplitude': 1.0}
+
+    # Calculate magnitudes for each band
+    lightcurves = {}
+    for band in bands:
+        lightcurves[band] = source.bandmag(params, band, phases, magsys='ab')
+
     print(f"  Generated light curves for {len(bands)} bands")
     print()
 
@@ -56,15 +63,19 @@ def main():
     # Plot 1: Example spectrum at peak
     ax1 = axes[0]
     peak_idx = jnp.argmax(-lightcurves['bessellv'])  # Find brightest time
-    peak_phase = phases[peak_idx]
+    peak_phase = float(phases[peak_idx])
 
-    spectrum = source._get_spectrum_at_phase(peak_phase)
+    # Find closest phase index in the model grid
+    phase_idx = jnp.argmin(jnp.abs(source.phases - peak_phase))
+    spectrum = source.flux_grid[phase_idx, :]
+
     ax1.plot(source.wavelengths, spectrum, 'k-', linewidth=2)
     ax1.set_xlabel('Wavelength (Å)', fontsize=12)
     ax1.set_ylabel(r'$F_\lambda$ (erg s$^{-1}$ cm$^{-2}$ Å$^{-1}$)', fontsize=12)
-    ax1.set_title(f'Spectrum at t = {peak_phase:.1f} days (near peak)', fontsize=14)
+    ax1.set_title(f'Spectrum at t = {float(source.phases[phase_idx]):.1f} days (near peak)', fontsize=14)
     ax1.set_xlim(3000, 10000)
     ax1.set_yscale('log')
+    ax1.set_ylim(1e-16, 1e-14)
     ax1.grid(True, alpha=0.3)
 
     # Plot 2: Multi-band light curves
@@ -78,7 +89,7 @@ def main():
 
     ax2.set_xlabel('Observer Frame Time (days)', fontsize=12)
     ax2.set_ylabel('AB Magnitude', fontsize=12)
-    ax2.set_title(f'Arnett Model Light Curves (z={source.redshift})', fontsize=14)
+    ax2.set_title('Arnett Model Light Curves (z=0.01)', fontsize=14)
     ax2.invert_yaxis()
     ax2.legend(fontsize=11)
     ax2.grid(True, alpha=0.3)
