@@ -71,7 +71,6 @@ def arnett_bolometric(
     time,
     f_nickel,
     mej,
-    *,
     vej=None,
     kappa=None,
     kappa_gamma=None,
@@ -111,7 +110,6 @@ def arnett_bolometric(
 def arnett_with_features_lum_dist(
     f_nickel,
     mej,
-    *,
     redshift=0.0,
     lum_dist=None,
     vej=None,
@@ -188,7 +186,6 @@ def arnett_with_features_lum_dist(
 def arnett_with_features_cosmology(
     f_nickel,
     mej,
-    *,
     redshift=0.0,
     cosmo_H0=PLANCK18_H0,
     cosmo_Om0=PLANCK18_OM0,
