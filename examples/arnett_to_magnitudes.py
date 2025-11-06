@@ -21,6 +21,7 @@ def main():
     print()
 
     # Create source directly from Arnett model (all in one step!)
+    # Note: The new interface automatically generates time/wavelength grids
     print("Creating source from Arnett model...")
     source = PrecomputedSpectraSource.from_arnett_model(
         f_nickel=0.1,
@@ -29,10 +30,7 @@ def main():
         kappa=0.07,
         kappa_gamma=0.1,
         temperature_floor=2000,
-        redshift=0.01,
-        time_min=0.1,
-        time_max=50.0,
-        n_times=1000
+        redshift=0.01
     )
     print(f"  Source created with {len(source.phases)} time points")
     print(f"  Time range: {source.phases[0]:.1f} - {source.phases[-1]:.1f} days")

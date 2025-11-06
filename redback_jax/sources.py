@@ -275,17 +275,17 @@ class PrecomputedSpectraSource:
         kappa_gamma: float = 0.1,
         temperature_floor: float = 5000.0,
         redshift: float = 0.0,
-        time_min: float = 0.1,
-        time_max: float = 100.0,
-        n_times: int = 200,
+        cosmo_H0: float = 67.66,
+        cosmo_Om0: float = 0.3111,
         zero_before: bool = True,
-        time_spline_degree: int = 3
+        time_spline_degree: int = 3,
+        features = None
     ) -> 'PrecomputedSpectraSource':
         """
         Create a source directly from Arnett model parameters.
 
-        This is a convenience method that generates the spectra and creates
-        the source in one step.
+        This is a convenience method that generates the spectra using the new
+        arnett_with_features_cosmology function and creates the source in one step.
 
         Parameters
         ----------
@@ -303,16 +303,16 @@ class PrecomputedSpectraSource:
             Minimum temperature in K (default: 5000.0)
         redshift : float, optional
             Source redshift (default: 0.0)
-        time_min : float, optional
-            Minimum time in days (default: 0.1)
-        time_max : float, optional
-            Maximum time in days (default: 100.0)
-        n_times : int, optional
-            Number of time points (default: 200)
+        cosmo_H0 : float, optional
+            Hubble constant in km/s/Mpc (default: 67.66, Planck18)
+        cosmo_Om0 : float, optional
+            Matter density parameter (default: 0.3111, Planck18)
         zero_before : bool, optional
             Return zero flux before first phase (default: True)
         time_spline_degree : int, optional
             Degree of spline interpolation in time (default: 3)
+        features : SEDFeatures, optional
+            Spectral features to add (default: None, uses NO_SED_FEATURES)
 
         Returns
         -------
@@ -329,21 +329,22 @@ class PrecomputedSpectraSource:
         >>> params = {'amplitude': 1.0}
         >>> mag = source.bandmag(params, 'bessellv', 15.0)
         """
-        from redback_jax.models.supernova_models import arnett_model
+        from redback_jax.models.supernova_models import arnett_with_features_cosmology
+        from redback_jax.models.sed_features import NO_SED_FEATURES
 
-        # Generate spectra
-        times = jnp.linspace(time_min, time_max, n_times)
-
-        output = arnett_model(
-            time=times,
+        # Use the new arnett_with_features_cosmology function
+        # This automatically generates the time grid and spectra
+        output = arnett_with_features_cosmology(
             f_nickel=f_nickel,
             mej=mej,
+            redshift=redshift,
+            cosmo_H0=cosmo_H0,
+            cosmo_Om0=cosmo_Om0,
             vej=vej,
             kappa=kappa,
             kappa_gamma=kappa_gamma,
             temperature_floor=temperature_floor,
-            redshift=redshift,
-            output_format='spectra'
+            features=features if features is not None else NO_SED_FEATURES
         )
 
         return cls(
@@ -352,6 +353,6 @@ class PrecomputedSpectraSource:
             flux_grid=output.spectra,
             zero_before=zero_before,
             time_spline_degree=time_spline_degree,
-            name=f'arnett_model',
+            name='arnett_model',
             version='redback_jax'
         )
