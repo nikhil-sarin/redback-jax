@@ -2,8 +2,18 @@
 Tests for redback_jax.models.supernova_models module.
 """
 import jax.numpy as jnp
+import numpy as np
 
-from redback_jax.models.supernova_models import _nickelcobalt_engine, arnett_bolometric
+from redback_jax.models.sed_features import SEDFeatures
+from redback_jax.models.supernova_models import (
+    _nickelcobalt_engine,
+    arnett_bolometric,
+    arnett_with_features_cosmology,
+    arnett_with_features_lum_dist,
+    PLANCK18_H0,
+    PLANCK18_OM0,
+)
+
 
 def test_nickelcobalt_engine():
     """Test the _nickelcobalt_engine function."""
@@ -44,3 +54,90 @@ def test_arnett_bolometric():
     lbol = arnett_bolometric(times, f_nickel, mej, kappa=0.04, kappa_gamma=0.11, vej=6500)
     expected = jnp.array([2.95054e+39, 2.78271e+41, 5.15889e+42, 1.29505e+43, 1.60733e+43, 7.32969e+42])
     assert jnp.allclose(lbol, expected, rtol=1e-4)
+
+
+def test_arnett_models():
+    """Test the arnett models specified by cosmology and luminosity distance."""
+    f_nickel = 0.1  # fraction of nickel mass
+    mej = 1.0  # solar masses
+
+    val_cosmo = arnett_with_features_cosmology(
+        f_nickel,
+        mej,
+        redshift=0.1,
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        cosmo_H0=PLANCK18_H0,
+        cosmo_Om0=PLANCK18_OM0,
+        temperature_floor=1000,
+    )
+    assert(val_cosmo.time.shape == (3000,))
+    assert(val_cosmo.lambdas.shape == (100,))
+    assert(val_cosmo.spectra.shape == (3000, 100))
+
+    # Check for a single peak at each time.
+    for i in range(len(val_cosmo.time)):
+        max_t = jnp.argmax(val_cosmo.spectra[i, :])
+        assert jnp.all(jnp.diff(val_cosmo.spectra[i, :max_t]) >= 0)
+        assert jnp.all(jnp.diff(val_cosmo.spectra[i, max_t:]) <= 0)
+
+    val_dl = arnett_with_features_lum_dist(
+        f_nickel,
+        mej,
+        redshift=0.1,
+        lum_dist=1.4684007701387617e+27,  # cm
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        temperature_floor=1000,
+    )
+    assert(val_dl.time.shape == (3000,))
+    assert(val_dl.lambdas.shape == (100,))
+    assert(val_dl.spectra.shape == (3000, 100))
+
+    assert jnp.allclose(val_cosmo.time, val_dl.time, rtol=1e-5)
+    assert jnp.allclose(val_cosmo.lambdas, val_dl.lambdas, rtol=1e-5)
+    assert jnp.allclose(val_cosmo.spectra, val_dl.spectra, rtol=1e-5)
+
+
+def test_arnett_with_features():
+    """Test the arnett model with features."""
+    f_nickel = 0.1  # fraction of nickel mass
+    mej = 1.0  # solar masses
+
+    # Compute a reference without features.
+    val_no_features = arnett_with_features_lum_dist(
+        f_nickel,
+        mej,
+        redshift=0.0,
+        lum_dist=1.4684007701387617e+27,  # cm
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        temperature_floor=1000,
+    )
+
+    features = SEDFeatures(
+        rest_wavelengths=jnp.array([5000.0, 6000.0]),
+        sigmas=jnp.array([1000.0, 2000.0]),
+        amplitudes=jnp.array([100.0, 200.0]),
+        t_starts=jnp.array([0.0, 100.0]),
+        t_ends=jnp.array([1000.0, 2000.0]),
+    )
+    val_features = arnett_with_features_lum_dist(
+        f_nickel,
+        mej,
+        redshift=0.0,
+        lum_dist=1.4684007701387617e+27,  # cm
+        kappa=0.07,
+        kappa_gamma=0.1,
+        vej=5000,
+        temperature_floor=1000,
+        features=features,
+    )
+
+    # Check that the features have modified the output of the spectra only.
+    assert jnp.allclose(val_no_features.time, val_features.time, rtol=1e-5)
+    assert jnp.allclose(val_no_features.lambdas, val_features.lambdas, rtol=1e-5)
+    assert not jnp.allclose(val_no_features.spectra, val_features.spectra, rtol=1e-5, atol=1e-20)
