@@ -21,7 +21,6 @@ from redback_jax.photosphere import compute_temperature_floor
 PLANCK18_H0 = 67.66  # km/s/Mpc
 PLANCK18_OM0 = 0.3111
 
-
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     """
     A general blackbody_to_flux_density formula
@@ -176,6 +175,8 @@ def arnett_with_features_lum_dist(
     # Convert erg/s/Hz/cm^2 to erg/cm^2/s/Angstrom using 2.998e18 for the
     # speed of light in Angstrom/s. We define this numerically to be JAX-friendly.
     spectra = spectral_flux_density * 2.998e18 / (lambda_observer_frame[None, :] ** 2)
+    # Need to also multiply by (1+z) to account for bandwidth stretching.
+    spectra = spectra * (1. + redshift)
     return namedtuple('output', ['time', 'lambdas', 'spectra'])(
         time=time_observer_frame,
         lambdas=lambda_observer_frame,
