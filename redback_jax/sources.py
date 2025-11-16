@@ -1,43 +1,170 @@
 """
-Source classes for transient modeling, similar to sncosmo/jax-bandflux interface.
+Source classes for transient modeling, compatible with jax-bandflux interface.
 
 These classes provide a convenient interface for calculating bandfluxes and magnitudes
-from precomputed or on-the-fly generated spectra, using JAX-bandflux's native capabilities.
+from precomputed or on-the-fly generated spectra, using JAX-bandflux's bandpass utilities.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from typing import Union, Optional, Dict, Tuple
-from jax_supernovae import TimeSeriesSource
-from jax_supernovae.bandpasses import get_bandpass
-from jax_supernovae.salt3 import precompute_bandflux_bridge
+from functools import partial
+from jax_supernovae.bandpasses import (
+    get_bandpass,
+    register_all_bandpasses,
+    Bandpass
+)
+from jax_supernovae.constants import HC_ERG_AA
+
+
+# Physical constants for bandflux calculation
+# HC_ERG_AA is already in erg * Angstrom
+
+
+def _interpolate_spectrum_1d(wavelengths: jnp.ndarray, flux: jnp.ndarray,
+                              target_wave: jnp.ndarray) -> jnp.ndarray:
+    """Linearly interpolate a spectrum to target wavelengths.
+
+    Parameters
+    ----------
+    wavelengths : jnp.ndarray
+        Source wavelengths (sorted)
+    flux : jnp.ndarray
+        Flux values at source wavelengths
+    target_wave : jnp.ndarray
+        Target wavelengths for interpolation
+
+    Returns
+    -------
+    jnp.ndarray
+        Interpolated flux values
+    """
+    return jnp.interp(target_wave, wavelengths, flux)
+
+
+def _interpolate_spectrum_time(phases: jnp.ndarray, flux_grid: jnp.ndarray,
+                                target_phase: float) -> jnp.ndarray:
+    """Interpolate spectrum at a given phase from a time series grid.
+
+    Parameters
+    ----------
+    phases : jnp.ndarray
+        Phase array (n_phases,)
+    flux_grid : jnp.ndarray
+        Flux grid (n_phases, n_wavelengths)
+    target_phase : float
+        Target phase for interpolation
+
+    Returns
+    -------
+    jnp.ndarray
+        Interpolated spectrum at target phase (n_wavelengths,)
+    """
+    # Linear interpolation in time at each wavelength
+    # Find surrounding indices
+    idx = jnp.searchsorted(phases, target_phase)
+    idx = jnp.clip(idx, 1, len(phases) - 1)
+
+    # Get phases and fluxes for interpolation
+    phase_lo = phases[idx - 1]
+    phase_hi = phases[idx]
+    flux_lo = flux_grid[idx - 1]
+    flux_hi = flux_grid[idx]
+
+    # Linear interpolation weight
+    t = (target_phase - phase_lo) / (phase_hi - phase_lo + 1e-10)
+    t = jnp.clip(t, 0.0, 1.0)
+
+    return flux_lo + t * (flux_hi - flux_lo)
+
+
+def _compute_bandflux_single(spectrum: jnp.ndarray, wavelengths: jnp.ndarray,
+                               bandpass: Bandpass) -> jnp.ndarray:
+    """Compute bandflux for a single spectrum and bandpass.
+
+    The bandflux is computed as:
+        flux = integral(f_lambda * T * lambda / (h*c)) dlambda
+
+    where f_lambda is in erg s^-1 cm^-2 Angstrom^-1
+
+    Parameters
+    ----------
+    spectrum : jnp.ndarray
+        Spectral flux density (erg s^-1 cm^-2 Angstrom^-1)
+    wavelengths : jnp.ndarray
+        Wavelength array (Angstrom)
+    bandpass : Bandpass
+        Bandpass object with transmission curve
+
+    Returns
+    -------
+    jnp.ndarray
+        Bandflux in photons s^-1 cm^-2
+    """
+    # Get integration wavelength grid from bandpass
+    wave_grid = bandpass.integration_wave
+    dwave = bandpass.integration_spacing
+
+    # Interpolate spectrum to integration grid
+    interp_flux = _interpolate_spectrum_1d(wavelengths, spectrum, wave_grid)
+
+    # Get transmission at integration wavelengths
+    trans = bandpass(wave_grid)
+
+    # Integrate: sum(f_lambda * T * lambda / (hc) * dlambda)
+    # This gives photons s^-1 cm^-2
+    integrand = interp_flux * trans * wave_grid / HC_ERG_AA
+    bandflux = jnp.sum(integrand) * dwave
+
+    return bandflux
+
+
+def _compute_bandmag_single(bandflux: jnp.ndarray) -> jnp.ndarray:
+    """Convert bandflux to AB magnitude.
+
+    Parameters
+    ----------
+    bandflux : jnp.ndarray
+        Bandflux in photons s^-1 cm^-2
+
+    Returns
+    -------
+    jnp.ndarray
+        AB magnitude
+    """
+    # AB magnitude system: m_AB = -2.5 * log10(flux) - 48.6
+    # where flux is in erg s^-1 cm^-2 Hz^-1
+    # For photon counting: m_AB = -2.5 * log10(bandflux) - 48.60
+    # This is an approximation; proper AB system requires frequency integral
+    # Using the standard formula for AB magnitudes from photon flux
+    return -2.5 * jnp.log10(bandflux + 1e-100) - 48.60
 
 
 class PrecomputedSpectraSource:
     """
-    A wrapper for TimeSeriesSource that follows the new functional API pattern.
+    A source class for computing bandfluxes from precomputed spectral time series.
 
-    This class provides a thin wrapper around TimeSeriesSource, following the new
-    functional API where parameters are passed as dictionaries to methods rather
-    than stored in the object. This enables JAX's JIT compilation and automatic
-    differentiation.
+    This class provides methods for calculating bandfluxes and magnitudes from
+    precomputed spectra, following a functional API where parameters are passed
+    as dictionaries. This enables JAX's JIT compilation and automatic differentiation.
 
     The amplitude parameter scales the entire spectral time series, allowing for
     fitting to observed photometry.
 
     Examples
     --------
-    >>> from redback_jax.models.supernova_models import arnett_model
+    >>> from redback_jax.models.supernova_models import arnett_with_features_cosmology
     >>> from redback_jax.sources import PrecomputedSpectraSource
+    >>> from redback_jax.models.sed_features import NO_SED_FEATURES
     >>>
-    >>> # Option 1: From precomputed spectra
-    >>> output = arnett_model(
-    ...     time=jnp.linspace(0.1, 50, 100),
+    >>> # Create from precomputed spectra
+    >>> output = arnett_with_features_cosmology(
     ...     f_nickel=0.1, mej=1.4, vej=5000,
     ...     kappa=0.07, kappa_gamma=0.1,
     ...     temperature_floor=5000,
     ...     redshift=0.01,
-    ...     output_format='spectra'
+    ...     features=NO_SED_FEATURES
     ... )
     >>> source = PrecomputedSpectraSource(
     ...     phases=output.time,
@@ -47,28 +174,23 @@ class PrecomputedSpectraSource:
     >>>
     >>> # Simple mode: Single band calculation
     >>> params = {'amplitude': 1.0}
-    >>> flux = source.bandflux(params, 'bessellv', 15.0)
-    >>> mag = source.bandmag(params, 'bessellv', 15.0)
+    >>> flux = source.bandflux(params, 'g', 15.0)
+    >>> mag = source.bandmag(params, 'g', 15.0)
     >>>
     >>> # Optimized mode: Pre-compute bridges for fitting
-    >>> unique_bands = ['bessellb', 'bessellv', 'bessellr']
+    >>> unique_bands = ['g', 'r', 'i']
     >>> bridges, band_to_idx = source.prepare_bridges(unique_bands)
     >>>
-    >>> # Now use with array of phases and band indices for fast fitting
+    >>> # Use with array of phases and band indices for fast fitting
     >>> import jax
     >>> @jax.jit
-    >>> def loglikelihood(amplitude, phases, band_indices, observed_fluxes, errors):
+    ... def loglikelihood(amplitude, phases, band_indices, observed_fluxes, errors):
     ...     params = {'amplitude': amplitude}
     ...     model_fluxes = source.bandflux(params, None, phases,
     ...                                     band_indices=band_indices,
     ...                                     bridges=bridges,
     ...                                     unique_bands=unique_bands)
     ...     return -0.5 * jnp.sum(((observed_fluxes - model_fluxes) / errors)**2)
-    >>>
-    >>> # Option 2: Direct from model
-    >>> source = PrecomputedSpectraSource.from_arnett_model(
-    ...     f_nickel=0.1, mej=1.4, vej=5000, redshift=0.01
-    ... )
     """
 
     def __init__(
@@ -77,12 +199,11 @@ class PrecomputedSpectraSource:
         wavelengths: Union[np.ndarray, jnp.ndarray],
         flux_grid: Union[np.ndarray, jnp.ndarray],
         zero_before: bool = True,
-        time_spline_degree: int = 3,
         name: Optional[str] = None,
         version: Optional[str] = None
     ):
         """
-        Initialize a precomputed spectra source using TimeSeriesSource.
+        Initialize a precomputed spectra source.
 
         Parameters
         ----------
@@ -95,8 +216,6 @@ class PrecomputedSpectraSource:
             Shape: (n_phases, n_wavelengths)
         zero_before : bool, optional
             Return zero flux before first phase (default: True)
-        time_spline_degree : int, optional
-            Degree of spline interpolation in time (default: 3 for cubic)
         name : str, optional
             Name of the source (default: None)
         version : str, optional
@@ -105,6 +224,9 @@ class PrecomputedSpectraSource:
         self.phases = jnp.asarray(phases)
         self.wavelengths = jnp.asarray(wavelengths)
         self.flux_grid = jnp.asarray(flux_grid)
+        self.zero_before = zero_before
+        self.name = name or 'redback_source'
+        self.version = version or 'v1.0'
 
         # Validate shapes
         if self.flux_grid.shape != (len(self.phases), len(self.wavelengths)):
@@ -113,18 +235,37 @@ class PrecomputedSpectraSource:
                 f"expected shape ({len(self.phases)}, {len(self.wavelengths)})"
             )
 
-        # Create the underlying TimeSeriesSource from jaxbandflux
-        # Note: TimeSeriesSource expects flux in erg s^-1 cm^-2 Angstrom^-1
-        # TimeSeriesSource takes (phase, wave, flux) not (phases, wavelengths, flux_grid)
-        self._source = TimeSeriesSource(
-            phase=np.asarray(self.phases),
-            wave=np.asarray(self.wavelengths),
-            flux=np.asarray(self.flux_grid),
-            zero_before=zero_before,
-            time_spline_degree=time_spline_degree,
-            name=name or 'redback_source',
-            version=version or 'v1.0'
-        )
+        # Ensure bandpasses are registered
+        register_all_bandpasses()
+
+    def _get_spectrum_at_phase(self, phase: float, amplitude: float) -> jnp.ndarray:
+        """Get interpolated spectrum at a given phase.
+
+        Parameters
+        ----------
+        phase : float
+            Observer frame time in days
+        amplitude : float
+            Amplitude scaling factor
+
+        Returns
+        -------
+        jnp.ndarray
+            Spectrum at given phase, scaled by amplitude
+        """
+        # Handle zero_before
+        if self.zero_before:
+            # Return zeros if before first phase
+            spectrum = jax.lax.cond(
+                phase < self.phases[0],
+                lambda _: jnp.zeros_like(self.wavelengths),
+                lambda _: _interpolate_spectrum_time(self.phases, self.flux_grid, phase),
+                None
+            )
+        else:
+            spectrum = _interpolate_spectrum_time(self.phases, self.flux_grid, phase)
+
+        return amplitude * spectrum
 
     def bandflux(
         self,
@@ -138,7 +279,7 @@ class PrecomputedSpectraSource:
         unique_bands: Optional[list] = None
     ) -> Union[float, jnp.ndarray]:
         """
-        Calculate bandflux at given phase(s) using TimeSeriesSource.
+        Calculate bandflux at given phase(s).
 
         Two modes of operation:
         1. Simple mode: Provide band name for single/multiple phase calculations
@@ -149,11 +290,11 @@ class PrecomputedSpectraSource:
         params : dict
             Parameter dictionary with 'amplitude' key for scaling the flux
         band : str or None
-            Bandpass name (e.g., 'bessellb', 'bessellv'). Required for simple mode.
+            Bandpass name (e.g., 'g', 'r', 'ztfg'). Required for simple mode.
         phase : float or array_like
             Phase/time in days (observer frame). Can be scalar or array.
         zp : float, optional
-            Zero point (default: None)
+            Zero point (default: None, not used)
         zpsys : str, optional
             Magnitude system (default: 'ab')
         band_indices : jnp.ndarray, optional
@@ -172,25 +313,86 @@ class PrecomputedSpectraSource:
         --------
         # Simple mode
         >>> params = {'amplitude': 1.0}
-        >>> flux = source.bandflux(params, 'bessellb', 0.0)
+        >>> flux = source.bandflux(params, 'g', 0.0)
 
         # Optimized mode for fitting
-        >>> bridges, band_to_idx = source.prepare_bridges(['bessellb', 'bessellv'])
-        >>> band_indices = jnp.array([0, 0, 1, 1])  # Two B, two V observations
+        >>> bridges, band_to_idx = source.prepare_bridges(['g', 'r'])
+        >>> band_indices = jnp.array([0, 0, 1, 1])  # Two g, two r observations
         >>> phases = jnp.array([0, 5, 0, 5])
         >>> fluxes = source.bandflux(params, None, phases,
         ...                          band_indices=band_indices,
         ...                          bridges=bridges,
-        ...                          unique_bands=['bessellb', 'bessellv'])
+        ...                          unique_bands=['g', 'r'])
         """
-        # Delegate to TimeSeriesSource's bandflux method
-        return self._source.bandflux(
-            params, band, phase,
-            zp=zp, zpsys=zpsys,
-            band_indices=band_indices,
-            bridges=bridges,
-            unique_bands=unique_bands
-        )
+        amplitude = params.get('amplitude', 1.0)
+        phase = jnp.asarray(phase)
+
+        # Optimized mode: use precomputed bridges
+        if band_indices is not None and bridges is not None and unique_bands is not None:
+            return self._bandflux_optimized(
+                amplitude, phase, band_indices, bridges, unique_bands
+            )
+
+        # Simple mode: single band
+        if band is None:
+            raise ValueError("Band must be specified in simple mode")
+
+        bandpass = get_bandpass(band)
+
+        # Handle scalar vs array phase
+        if phase.ndim == 0:
+            # Scalar phase
+            spectrum = self._get_spectrum_at_phase(float(phase), amplitude)
+            return _compute_bandflux_single(spectrum, self.wavelengths, bandpass)
+        else:
+            # Array of phases
+            def compute_single(ph):
+                spectrum = self._get_spectrum_at_phase(ph, amplitude)
+                return _compute_bandflux_single(spectrum, self.wavelengths, bandpass)
+
+            return jax.vmap(compute_single)(phase)
+
+    def _bandflux_optimized(
+        self,
+        amplitude: float,
+        phases: jnp.ndarray,
+        band_indices: jnp.ndarray,
+        bridges: Tuple,
+        unique_bands: list
+    ) -> jnp.ndarray:
+        """Compute bandfluxes using precomputed bridges for multiple bands.
+
+        Parameters
+        ----------
+        amplitude : float
+            Amplitude scaling factor
+        phases : jnp.ndarray
+            Phase array (n_obs,)
+        band_indices : jnp.ndarray
+            Band indices (n_obs,)
+        bridges : tuple
+            Precomputed bandpass bridges
+        unique_bands : list
+            List of unique band names
+
+        Returns
+        -------
+        jnp.ndarray
+            Bandfluxes for each observation
+        """
+        # Get bandpass objects
+        bandpasses = [get_bandpass(b) for b in unique_bands]
+
+        def compute_single_obs(phase, band_idx):
+            spectrum = self._get_spectrum_at_phase(phase, amplitude)
+            # Select bandpass based on index
+            # Use lax.switch for efficient branching
+            def compute_for_band(i):
+                return _compute_bandflux_single(spectrum, self.wavelengths, bandpasses[i])
+
+            return jax.lax.switch(band_idx, [partial(compute_for_band, i) for i in range(len(bandpasses))])
+
+        return jax.vmap(compute_single_obs)(phases, band_indices)
 
     def bandmag(
         self,
@@ -200,14 +402,14 @@ class PrecomputedSpectraSource:
         magsys: str = 'ab'
     ) -> Union[float, jnp.ndarray]:
         """
-        Calculate magnitude at given phase(s) using TimeSeriesSource.
+        Calculate magnitude at given phase(s).
 
         Parameters
         ----------
         params : dict
             Parameter dictionary with 'amplitude' key for scaling the flux
         band : str
-            Bandpass name (e.g., 'bessellb', 'bessellv')
+            Bandpass name (e.g., 'g', 'r', 'ztfg')
         phase : float or array_like
             Phase/time in days (observer frame)
         magsys : str, optional
@@ -221,12 +423,11 @@ class PrecomputedSpectraSource:
         Examples
         --------
         >>> params = {'amplitude': 1.0}
-        >>> mag = source.bandmag(params, 'bessellv', 15.0)
-        >>> mags = source.bandmag(params, 'bessellb', jnp.array([0, 5, 10]))
+        >>> mag = source.bandmag(params, 'g', 15.0)
+        >>> mags = source.bandmag(params, 'r', jnp.array([0, 5, 10]))
         """
-        # Delegate to TimeSeriesSource's bandmag method
-        # Note: TimeSeriesSource.bandmag signature is (params, bands, magsys, phases, ...)
-        return self._source.bandmag(params, band, magsys, phase)
+        flux = self.bandflux(params, band, phase)
+        return _compute_bandmag_single(flux)
 
     def prepare_bridges(
         self,
@@ -246,13 +447,13 @@ class PrecomputedSpectraSource:
         Returns
         -------
         bridges : tuple
-            Tuple of pre-computed bandpass bridges
+            Tuple of pre-computed bandpass bridges (Bandpass objects)
         band_to_idx : dict
             Dictionary mapping band names to indices in bridges tuple
 
         Examples
         --------
-        >>> unique_bands = ['bessellb', 'bessellv', 'bessellr']
+        >>> unique_bands = ['g', 'r', 'i']
         >>> bridges, band_to_idx = source.prepare_bridges(unique_bands)
         >>> # Now use these in optimized bandflux calls
         >>> band_indices = jnp.array([band_to_idx[b] for b in obs_bands])
@@ -261,7 +462,7 @@ class PrecomputedSpectraSource:
         ...                          bridges=bridges,
         ...                          unique_bands=unique_bands)
         """
-        bridges = tuple(precompute_bandflux_bridge(get_bandpass(b)) for b in unique_bands)
+        bridges = tuple(get_bandpass(b) for b in unique_bands)
         band_to_idx = {band: i for i, band in enumerate(unique_bands)}
         return bridges, band_to_idx
 
@@ -278,13 +479,12 @@ class PrecomputedSpectraSource:
         cosmo_H0: float = 67.66,
         cosmo_Om0: float = 0.3111,
         zero_before: bool = True,
-        time_spline_degree: int = 3,
         features = None
     ) -> 'PrecomputedSpectraSource':
         """
         Create a source directly from Arnett model parameters.
 
-        This is a convenience method that generates the spectra using the new
+        This is a convenience method that generates the spectra using the
         arnett_with_features_cosmology function and creates the source in one step.
 
         Parameters
@@ -309,8 +509,6 @@ class PrecomputedSpectraSource:
             Matter density parameter (default: 0.3111, Planck18)
         zero_before : bool, optional
             Return zero flux before first phase (default: True)
-        time_spline_degree : int, optional
-            Degree of spline interpolation in time (default: 3)
         features : SEDFeatures, optional
             Spectral features to add (default: None, uses NO_SED_FEATURES)
 
@@ -327,13 +525,12 @@ class PrecomputedSpectraSource:
         ...     temperature_floor=5000, redshift=0.01
         ... )
         >>> params = {'amplitude': 1.0}
-        >>> mag = source.bandmag(params, 'bessellv', 15.0)
+        >>> mag = source.bandmag(params, 'g', 15.0)
         """
         from redback_jax.models.supernova_models import arnett_with_features_cosmology
         from redback_jax.models.sed_features import NO_SED_FEATURES
 
-        # Use the new arnett_with_features_cosmology function
-        # This automatically generates the time grid and spectra
+        # Use the arnett_with_features_cosmology function
         output = arnett_with_features_cosmology(
             f_nickel=f_nickel,
             mej=mej,
@@ -352,7 +549,6 @@ class PrecomputedSpectraSource:
             wavelengths=output.lambdas,
             flux_grid=output.spectra,
             zero_before=zero_before,
-            time_spline_degree=time_spline_degree,
             name='arnett_model',
             version='redback_jax'
         )
