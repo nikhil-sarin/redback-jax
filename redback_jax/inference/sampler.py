@@ -11,7 +11,13 @@ import jax.numpy as jnp
 import numpy as np
 from typing import Dict, Callable, Optional, Tuple, Any, NamedTuple
 from functools import partial
-import blackjax
+
+try:
+    import blackjax
+    HAS_BLACKJAX = True
+except ImportError:
+    HAS_BLACKJAX = False
+    blackjax = None
 
 try:
     import anesthetic
@@ -151,7 +157,18 @@ def run_nested_sampling(
     -------
     SamplerResult
         Results from the SMC sampling run with evidence estimate
+
+    Raises
+    ------
+    ImportError
+        If blackjax is not installed
     """
+    if not HAS_BLACKJAX:
+        raise ImportError(
+            "blackjax is required for sampling. "
+            "Install with: pip install blackjax"
+        )
+
     if rng_key is None:
         rng_key = jax.random.PRNGKey(42)
 
@@ -282,7 +299,18 @@ def run_mcmc(
     -------
     SamplerResult
         Results from the MCMC run
+
+    Raises
+    ------
+    ImportError
+        If blackjax is not installed
     """
+    if not HAS_BLACKJAX:
+        raise ImportError(
+            "blackjax is required for sampling. "
+            "Install with: pip install blackjax"
+        )
+
     if rng_key is None:
         rng_key = jax.random.PRNGKey(42)
 

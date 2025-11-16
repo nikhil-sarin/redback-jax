@@ -11,6 +11,7 @@ from .sampler import (
     fit_transient,
     to_anesthetic_samples,
     summarize_result,
+    HAS_BLACKJAX,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     'fit_transient',
     'to_anesthetic_samples',
     'summarize_result',
+    'HAS_BLACKJAX',
 ]

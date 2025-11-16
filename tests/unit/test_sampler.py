@@ -19,6 +19,7 @@ from redback_jax.inference import (
     create_gaussian_likelihood,
     run_nested_sampling,
     summarize_result,
+    HAS_BLACKJAX,
 )
 
 
@@ -33,6 +34,7 @@ def test_inference_imports():
     assert hasattr(inference, 'run_mcmc')
     assert hasattr(inference, 'fit_transient')
     assert hasattr(inference, 'SamplerResult')
+    assert hasattr(inference, 'HAS_BLACKJAX')
 
 
 def test_create_uniform_prior():
@@ -109,6 +111,7 @@ def test_create_gaussian_likelihood_jit():
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(not HAS_BLACKJAX, reason="blackjax not installed")
 def test_run_nested_sampling_simple():
     """Test importance sampling on a simple Gaussian problem.
 
