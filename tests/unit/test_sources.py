@@ -1,11 +1,11 @@
 """
-Tests for redback_jax.sources module with jax-bandflux TimeSeriesSource integration.
+Tests for redback_jax.sources module with jax-bandflux integration.
 
 These tests verify:
-1. PrecomputedSpectraSource correctly wraps TimeSeriesSource
+1. PrecomputedSpectraSource correctly implements bandflux calculations
 2. Functional API works with params dict (amplitude parameter)
 3. Simple mode (single band) and optimized mode (bridges) both work
-4. from_arnett_model classmethod integrates with new supernova_models interface
+4. from_arnett_model classmethod integrates with supernova_models interface
 5. JIT compilation works for fitting workflows
 """
 import jax
@@ -46,7 +46,6 @@ def simple_sed_source():
         wavelengths=wavelengths,
         flux_grid=flux_grid,
         zero_before=True,
-        time_spline_degree=3,
         name='test_sed',
         version='1.0'
     )
@@ -60,17 +59,16 @@ def test_initialization(simple_sed_source):
     assert hasattr(source, 'phases')
     assert hasattr(source, 'wavelengths')
     assert hasattr(source, 'flux_grid')
-    assert hasattr(source, '_source')
 
     # Check shapes
     assert len(source.phases) == 60
     assert len(source.wavelengths) == 200
     assert source.flux_grid.shape == (60, 200)
 
-    # Check that underlying TimeSeriesSource was created
-    assert source._source is not None
-    assert hasattr(source._source, 'bandflux')
-    assert hasattr(source._source, 'bandmag')
+    # Check metadata
+    assert source.name == 'test_sed'
+    assert source.version == '1.0'
+    assert source.zero_before is True
 
 
 def test_initialization_shape_mismatch():
@@ -92,15 +90,15 @@ def test_bandflux_simple_mode(simple_sed_source):
     source = simple_sed_source
     params = {'amplitude': 1.0}
 
-    # Test single phase
-    flux = source.bandflux(params, 'bessellb', 0.0)
+    # Test single phase - use registered bandpasses (g, r, i)
+    flux = source.bandflux(params, 'g', 0.0)
     assert isinstance(flux, (float, jnp.ndarray))
     assert jnp.isfinite(flux)
     assert flux > 0
 
     # Test multiple phases
     phases = jnp.array([-10, -5, 0, 5, 10])
-    fluxes = source.bandflux(params, 'bessellb', phases)
+    fluxes = source.bandflux(params, 'g', phases)
     assert fluxes.shape == (5,)
     assert jnp.all(jnp.isfinite(fluxes))
     assert jnp.all(fluxes > 0)
@@ -112,13 +110,13 @@ def test_bandmag_simple_mode(simple_sed_source):
     params = {'amplitude': 1.0}
 
     # Test single phase
-    mag = source.bandmag(params, 'bessellv', 0.0)
+    mag = source.bandmag(params, 'r', 0.0)
     assert isinstance(mag, (float, jnp.ndarray))
     assert jnp.isfinite(mag)
 
     # Test multiple phases
     phases = jnp.array([-10, -5, 0, 5, 10])
-    mags = source.bandmag(params, 'bessellv', phases)
+    mags = source.bandmag(params, 'r', phases)
     assert mags.shape == (5,)
     assert jnp.all(jnp.isfinite(mags))
 
@@ -127,7 +125,7 @@ def test_amplitude_scaling(simple_sed_source):
     """Test that amplitude parameter correctly scales flux."""
     source = simple_sed_source
     phase = 0.0
-    band = 'bessellb'
+    band = 'g'
 
     # Get fluxes with different amplitudes
     flux_1 = source.bandflux({'amplitude': 1.0}, band, phase)
@@ -142,7 +140,7 @@ def test_amplitude_scaling(simple_sed_source):
 def test_prepare_bridges(simple_sed_source):
     """Test prepare_bridges method for optimized mode."""
     source = simple_sed_source
-    unique_bands = ['bessellb', 'bessellv', 'bessellr']
+    unique_bands = ['g', 'r', 'i']
 
     bridges, band_to_idx = source.prepare_bridges(unique_bands)
 
@@ -153,9 +151,9 @@ def test_prepare_bridges(simple_sed_source):
     assert len(band_to_idx) == 3
 
     # Check band mapping
-    assert band_to_idx['bessellb'] == 0
-    assert band_to_idx['bessellv'] == 1
-    assert band_to_idx['bessellr'] == 2
+    assert band_to_idx['g'] == 0
+    assert band_to_idx['r'] == 1
+    assert band_to_idx['i'] == 2
 
 
 def test_bandflux_optimized_mode(simple_sed_source):
@@ -164,12 +162,12 @@ def test_bandflux_optimized_mode(simple_sed_source):
     params = {'amplitude': 1.0}
 
     # Prepare bridges
-    unique_bands = ['bessellb', 'bessellv', 'bessellr']
+    unique_bands = ['g', 'r', 'i']
     bridges, band_to_idx = source.prepare_bridges(unique_bands)
 
     # Simulate observations
     obs_phases = jnp.array([-5, 5, -5, 5, -5, 5])
-    obs_bands = ['bessellb', 'bessellb', 'bessellv', 'bessellv', 'bessellr', 'bessellr']
+    obs_bands = ['g', 'g', 'r', 'r', 'i', 'i']
     band_indices = jnp.array([band_to_idx[b] for b in obs_bands])
 
     # Calculate fluxes in optimized mode
@@ -186,7 +184,7 @@ def test_bandflux_optimized_mode(simple_sed_source):
     assert jnp.all(fluxes_opt > 0)
 
     # Compare with simple mode for validation
-    flux_simple_0 = source.bandflux(params, 'bessellb', -5)
+    flux_simple_0 = source.bandflux(params, 'g', -5)
     assert jnp.allclose(fluxes_opt[0], flux_simple_0, rtol=1e-6)
 
 
@@ -195,7 +193,7 @@ def test_jit_compilation(simple_sed_source):
     source = simple_sed_source
 
     # Prepare bridges
-    unique_bands = ['bessellb', 'bessellv']
+    unique_bands = ['g', 'r']
     bridges, band_to_idx = source.prepare_bridges(unique_bands)
 
     # Setup mock observations
@@ -228,7 +226,7 @@ def test_jit_likelihood(simple_sed_source):
     source = simple_sed_source
 
     # Prepare bridges
-    unique_bands = ['bessellb', 'bessellv']
+    unique_bands = ['g', 'r']
     bridges, band_to_idx = source.prepare_bridges(unique_bands)
 
     # Generate synthetic observations
@@ -300,14 +298,14 @@ def test_from_arnett_model():
     # Check flux grid shape
     assert source.flux_grid.shape == (3000, 100)
 
-    # Test that we can calculate fluxes
+    # Test that we can calculate fluxes - use 'r' band which covers optical wavelengths
     params = {'amplitude': 1.0}
-    flux = source.bandflux(params, 'bessellv', 15.0)
+    flux = source.bandflux(params, 'r', 15.0)
     assert jnp.isfinite(flux)
     assert flux > 0
 
     # Test magnitude calculation
-    mag = source.bandmag(params, 'bessellv', 15.0)
+    mag = source.bandmag(params, 'r', 15.0)
     assert jnp.isfinite(mag)
 
 
@@ -331,7 +329,7 @@ def test_from_arnett_model_with_cosmology_params():
 
     # Test flux calculation
     params = {'amplitude': 1.0}
-    flux = source.bandflux(params, 'bessellb', 20.0)
+    flux = source.bandflux(params, 'g', 20.0)
     assert jnp.isfinite(flux)
 
 
@@ -360,46 +358,38 @@ def test_zero_before_parameter():
     params = {'amplitude': 1.0}
 
     # Test at phase before grid (should be zero for zero_before=True)
-    flux_zero = source_zero.bandflux(params, 'bessellb', -10.0)
-    flux_no_zero = source_no_zero.bandflux(params, 'bessellb', -10.0)
+    flux_zero = source_zero.bandflux(params, 'g', -10.0)
+    flux_no_zero = source_no_zero.bandflux(params, 'g', -10.0)
 
-    # Note: The exact behavior depends on TimeSeriesSource implementation
-    # This test documents the expected behavior
+    # With zero_before=True, flux should be very close to zero
     assert jnp.isfinite(flux_zero)
     assert jnp.isfinite(flux_no_zero)
 
+    # flux_zero should be effectively zero (or very small)
+    assert flux_zero < 1e-30  # Should be zero when phase < phases[0]
 
-def test_different_spline_degrees():
-    """Test different time_spline_degree values."""
+    # flux_no_zero should be positive (uses first available spectrum)
+    assert flux_no_zero > 0
+
+
+def test_default_amplitude():
+    """Test that amplitude defaults to 1.0 if not provided."""
     phases = np.linspace(0, 40, 40)
     wavelengths = np.linspace(3000, 9000, 100)
     flux_grid = np.ones((40, 100)) * 1e-15
 
-    # Cubic interpolation (default)
-    source_cubic = PrecomputedSpectraSource(
+    source = PrecomputedSpectraSource(
         phases=phases,
         wavelengths=wavelengths,
-        flux_grid=flux_grid,
-        time_spline_degree=3
+        flux_grid=flux_grid
     )
 
-    # Linear interpolation
-    source_linear = PrecomputedSpectraSource(
-        phases=phases,
-        wavelengths=wavelengths,
-        flux_grid=flux_grid,
-        time_spline_degree=1
-    )
+    # Test with empty params dict
+    params_empty = {}
+    params_explicit = {'amplitude': 1.0}
 
-    params = {'amplitude': 1.0}
+    flux_empty = source.bandflux(params_empty, 'g', 20.0)
+    flux_explicit = source.bandflux(params_explicit, 'g', 20.0)
 
-    # Both should work
-    flux_cubic = source_cubic.bandflux(params, 'bessellb', 20.0)
-    flux_linear = source_linear.bandflux(params, 'bessellb', 20.0)
-
-    assert jnp.isfinite(flux_cubic)
-    assert jnp.isfinite(flux_linear)
-
-    # They should be similar but not identical
-    # (for a uniform grid they should be very close)
-    assert jnp.allclose(flux_cubic, flux_linear, rtol=0.1)
+    # Should give same result
+    assert jnp.allclose(flux_empty, flux_explicit, rtol=1e-6)
