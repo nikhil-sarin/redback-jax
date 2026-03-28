@@ -9,9 +9,16 @@ __version__ = "0.1.0"
 __author__ = "Nikhil Sarin"
 __email__ = "nsarin.astro@gmail.com"
 
-import jax
-jax.config.update("jax_enable_x64", True)
 
-# Core imports
-from .transient import Transient, Spectrum
-from .sources import PrecomputedSpectraSource
+def __getattr__(name):
+    """Lazy imports to avoid enabling JAX x64 at package load time."""
+    if name == 'Transient' or name == 'Spectrum':
+        from .transient import Transient, Spectrum
+        globals()['Transient'] = Transient
+        globals()['Spectrum'] = Spectrum
+        return globals()[name]
+    if name == 'PrecomputedSpectraSource':
+        from .sources import PrecomputedSpectraSource
+        globals()['PrecomputedSpectraSource'] = PrecomputedSpectraSource
+        return PrecomputedSpectraSource
+    raise AttributeError(f"module 'redback_jax' has no attribute {name!r}")

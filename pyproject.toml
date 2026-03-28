@@ -40,10 +40,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-all = [
+models = [
+    # Extra analytical models (magnetar, CSM, shock-cooling, TDE, kilonova).
+    # scipy is already a core dependency; listed here for discoverability.
+    "scipy>=1.7.0",
+]
+inference = [
     "numpyro>=0.12.0",
     "blackjax>=1.0.0",
     "optax>=0.1.0",
+]
+all = [
+    "redback-jax[models,inference]",
 ]
 dev = [
     "pytest>=6.0",
