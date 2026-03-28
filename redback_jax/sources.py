@@ -16,6 +16,8 @@ from jax_supernovae.bandpasses import (
     Bandpass
 )
 from jax_supernovae.constants import HC_ERG_AA
+from jax_supernovae.salt3 import precompute_bandflux_bridge
+from jax_supernovae.timeseries import timeseries_multiband_flux
 
 
 # Physical constants for bandflux calculation
@@ -227,6 +229,7 @@ class PrecomputedSpectraSource:
         self.zero_before = zero_before
         self.name = name or 'redback_source'
         self.version = version or 'v1.0'
+        self._minphase = float(np.asarray(phases).flat[0])
 
         # Validate shapes
         if self.flux_grid.shape != (len(self.phases), len(self.wavelengths)):
@@ -370,8 +373,9 @@ class PrecomputedSpectraSource:
             Phase array (n_obs,)
         band_indices : jnp.ndarray
             Band indices (n_obs,)
-        bridges : tuple
-            Precomputed bandpass bridges
+        bridges : tuple of dict
+            Precomputed bandpass bridges (from prepare_bridges), each with
+            keys 'wave', 'dwave', 'trans' as returned by precompute_bandflux_bridge
         unique_bands : list
             List of unique band names
 
@@ -380,19 +384,12 @@ class PrecomputedSpectraSource:
         jnp.ndarray
             Bandfluxes for each observation
         """
-        # Get bandpass objects
-        bandpasses = [get_bandpass(b) for b in unique_bands]
-
-        def compute_single_obs(phase, band_idx):
-            spectrum = self._get_spectrum_at_phase(phase, amplitude)
-            # Select bandpass based on index
-            # Use lax.switch for efficient branching
-            def compute_for_band(i):
-                return _compute_bandflux_single(spectrum, self.wavelengths, bandpasses[i])
-
-            return jax.lax.switch(band_idx, [partial(compute_for_band, i) for i in range(len(bandpasses))])
-
-        return jax.vmap(compute_single_obs)(phases, band_indices)
+        return timeseries_multiband_flux(
+            phases, bridges, band_indices,
+            self.phases, self.wavelengths, self.flux_grid,
+            amplitude, self.zero_before, self._minphase,
+            time_degree=1
+        )
 
     def bandmag(
         self,
@@ -462,7 +459,7 @@ class PrecomputedSpectraSource:
         ...                          bridges=bridges,
         ...                          unique_bands=unique_bands)
         """
-        bridges = tuple(get_bandpass(b) for b in unique_bands)
+        bridges = tuple(precompute_bandflux_bridge(get_bandpass(b)) for b in unique_bands)
         band_to_idx = {band: i for i, band in enumerate(unique_bands)}
         return bridges, band_to_idx
 

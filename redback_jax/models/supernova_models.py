@@ -185,7 +185,6 @@ def arnett_with_features_lum_dist(
 
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
-@jit
 def arnett_with_features_cosmology(
     f_nickel,
     mej,
