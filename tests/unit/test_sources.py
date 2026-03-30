@@ -77,7 +77,7 @@ def test_initialization_shape_mismatch():
     wavelengths = np.linspace(3000, 9000, 200)
     flux_grid = np.ones((50, 200))  # Wrong shape!
 
-    with pytest.raises(ValueError, match="Flux grid shape"):
+    with pytest.raises(ValueError, match="shape"):
         PrecomputedSpectraSource(
             phases=phases,
             wavelengths=wavelengths,

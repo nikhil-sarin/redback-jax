@@ -1,4 +1,5 @@
-from redback_jax.constants import *
+# Use Python float constants to avoid astropy float64 promotion
+_C_SI = 2.99792458e8   # m/s
 
 
 def calc_kcorrected_properties(frequency, redshift, time):
@@ -20,7 +21,7 @@ def lambda_to_nu(wavelength):
     :param wavelength: wavelength in Angstrom
     :return: frequency in Hertz
     """
-    return speed_of_light_si / (wavelength * 1.e-10)
+    return _C_SI / (wavelength * 1.e-10)
 
 
 def nu_to_lambda(frequency):
@@ -28,4 +29,4 @@ def nu_to_lambda(frequency):
     :param frequency: frequency in Hertz
     :return: wavelength in Angstrom
     """
-    return 1.e10 * (speed_of_light_si / frequency)
+    return 1.e10 * (_C_SI / frequency)
