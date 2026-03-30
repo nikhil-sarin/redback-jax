@@ -126,8 +126,10 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
 
     if neutron_precursor:
         Ye           = _electron_fraction_from_kappa(kappa)
-        neutron_mass = 1e-8 * _SOLAR_MASS
-        Xn0 = (1.0 - 2.0 * Ye * 2.0 * jnp.arctan(neutron_mass
+        # Metzger 2014 eq. 7: transition mass m_n ~ 1e-4 Msun separates
+        # neutron-dominated outer layers (m << m_n) from r-process inner layers
+        neutron_mass = 1e-4 * _SOLAR_MASS
+        Xn0 = ((1.0 - 2.0 * Ye) * 2.0 * jnp.arctan(neutron_mass
                / (m_arr * _SOLAR_MASS)) / jnp.pi)
         Xr  = 1.0 - Xn0
 
@@ -153,7 +155,10 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
 
         if neutron_precursor:
             Xn_t    = Xn0 * jnp.exp(-t_i / tau_neutron)
-            edotn   = 3.2e14 * Xn_t * Xn_t
+            # Metzger 2014 eq.: ėn = 3.2e14 * Xn (linear, not quadratic)
+            edotn   = 3.2e14 * Xn_t
+            # kappa_n: e-scattering from protons produced by neutron decay
+            # (fraction that was Xn0 but has since decayed = Xn0 - Xn(t))
             kappa_n = 0.4 * (1.0 - Xn_t - Xr)
             kap     = kappa_n + kappa * Xr
         else:
@@ -261,9 +266,9 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
 
     if neutron_precursor:
         Ye           = _electron_fraction_from_kappa(kappa)
-        neutron_mass = 1e-8 * _SOLAR_MASS
-        Xn0 = (1.0 - 2.0 * Ye * 2.0
-               * jnp.arctan(neutron_mass / (m_arr * _SOLAR_MASS)) / jnp.pi)
+        neutron_mass = 1e-4 * _SOLAR_MASS
+        Xn0 = ((1.0 - 2.0 * Ye)
+               * 2.0 * jnp.arctan(neutron_mass / (m_arr * _SOLAR_MASS)) / jnp.pi)
         Xr  = 1.0 - Xn0
 
     E0 = 0.5 * m_arr * v_m ** 2   # Msun*(cm/s)^2, safe in float32
@@ -281,7 +286,7 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
 
         if neutron_precursor:
             Xn_t    = Xn0 * jnp.exp(-t_i / tau_neutron)
-            edotn   = 3.2e14 * Xn_t * Xn_t
+            edotn   = 3.2e14 * Xn_t
             kappa_n = 0.4 * (1.0 - Xn_t - Xr)
             kap     = kappa_n + kappa * Xr
         else:

@@ -36,9 +36,9 @@ _LOG10_E          = _math.log10(_math.e)
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/2021ApJ...909..209P/abstract')
 @jit
-def shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy):
+def shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy, nn, delta, kappa):
     """
-    Bolometric shock-cooling light curve following Piro (2021), n=10, delta=1.1.
+    Bolometric shock-cooling light curve following Piro (2021).
 
     All large quantities (mass, radius, energy) are passed as log10 to stay
     float32-safe throughout; all intermediate computations stay in log10 space.
@@ -47,43 +47,48 @@ def shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy):
     :param log10_mass: log10 envelope mass in solar masses
     :param log10_radius: log10 envelope radius in cm
     :param log10_energy: log10 explosion energy in erg
+    :param nn: outer density power-law slope
+    :param delta: inner density power-law slope
+    :param kappa: opacity in cm^2/g
     :return: log10 of bolometric luminosity in erg/s
     """
     fp = time.dtype
-    n     = 10.0
-    delta = 1.1
-    kappa = 0.2  # cm^2/g
-
-    # kk_pow is a small Python float — no overflow risk
+    n     = nn
     kk_pow = (n - 3.0) * (3.0 - delta) / (4.0 * _math.pi * (n - delta))
+
+    log10_kappa = jnp.log10(jnp.maximum(jnp.asarray(kappa, dtype=fp), jnp.array(1e-30, dtype=fp)))
 
     # log10(mass in grams)
     log10_mass_g = log10_mass + jnp.array(_LOG10_SOLAR_MASS, dtype=fp)
 
     # log10(vt):  vt^2 = coeff * E/m  =>  log10(vt) = 0.5*(log10(coeff) + log10_E - log10_m)
-    _vt_coeff = (n - 5.0) * (5.0 - delta) / ((n - 3.0) * (3.0 - delta)) * 2.0
-    log10_vt = 0.5 * (jnp.array(_math.log10(_vt_coeff), dtype=fp) + log10_energy - log10_mass_g)
+    log10_vt_coeff = jnp.log10(jnp.array(
+        abs((n - 5.0) * (5.0 - delta) / ((n - 3.0) * (3.0 - delta)) * 2.0), dtype=fp))
+    log10_vt = 0.5 * (log10_vt_coeff + log10_energy - log10_mass_g)
 
-    # log10(td in days):  td^2 = coeff * m / (vt * c)
-    _td_const = _math.log10(3.0 * kappa * kk_pow / ((n - 1.0) * _SPEED_OF_LIGHT)) - _LOG10_DAY_TO_S
-    log10_td = 0.5 * (jnp.array(_td_const, dtype=fp) + log10_mass_g - log10_vt)
-    td = jnp.power(jnp.array(10.0, dtype=fp), log10_td)  # days (< 1e5 days, safe float32)
+    # log10(td in days):  td^2 = (3*kappa*kk_pow*m) / ((n-1)*vt*c)
+    log10_kk_pow = jnp.log10(jnp.array(abs(kk_pow), dtype=fp))
+    log10_td_const = (jnp.array(_math.log10(3.0), dtype=fp) + log10_kappa + log10_kk_pow
+                      - jnp.log10(jnp.array(abs(n - 1.0), dtype=fp))
+                      - jnp.array(_LOG10_C_CGS, dtype=fp)
+                      - jnp.array(_LOG10_DAY_TO_S, dtype=fp))
+    log10_td = 0.5 * (log10_td_const + log10_mass_g - log10_vt)
+    td = jnp.power(jnp.array(10.0, dtype=fp), log10_td)  # days
 
     t = jnp.maximum(time, jnp.array(1.0 / _DAY_TO_S, dtype=fp))
 
-    # log10_prefactor = log10(pi*(n-1)/(3*(n-5)) * c / kappa) + log10_R + 2*log10_vt
-    # All three terms can be >> 38 in log10, but we stay in log10
-    _pf_const = _math.log10(_math.pi * abs(n - 1.0) * _SPEED_OF_LIGHT
-                             / (3.0 * abs(n - 5.0) * kappa))
-    log10_prefactor = (jnp.array(_pf_const, dtype=fp)
+    # log10_prefactor = log10(pi*(n-1)/(3*|n-5|) * c / kappa) + log10_R + 2*log10_vt
+    log10_prefactor = (jnp.log10(jnp.array(_math.pi * abs(n - 1.0) / (3.0 * abs(n - 5.0)), dtype=fp))
+                       + jnp.array(_LOG10_C_CGS, dtype=fp)
+                       - log10_kappa
                        + log10_radius
                        + 2.0 * log10_vt)
 
-    log10_t  = jnp.log10(jnp.maximum(t,  jnp.array(1e-30, dtype=fp)))
+    log10_t      = jnp.log10(jnp.maximum(t,  jnp.array(1e-30, dtype=fp)))
     log10_td_val = jnp.log10(jnp.maximum(td, jnp.array(1e-30, dtype=fp)))
 
     # Pre-peak: lbol = prefactor * (td/t)^(4/(n-2))
-    log10_lbol_pre = log10_prefactor + jnp.array(4.0 / (n - 2.0), dtype=fp) * (log10_td_val - log10_t)
+    log10_lbol_pre = log10_prefactor + (4.0 / (n - 2.0)) * (log10_td_val - log10_t)
 
     # Post-peak: lbol = prefactor * exp(-0.5*(t^2/td^2 - 1))
     exponent = jnp.clip(-0.5 * (t ** 2 / jnp.maximum(td, jnp.array(1e-30, dtype=fp)) ** 2 - 1.0),
@@ -192,3 +197,48 @@ def shocked_cocoon_bolometric(time, mej, vej, eta, tshock,
     taper = (1.0 + jnp.tanh(t_thin - time)) / 2.0
     log10_taper = jnp.log10(jnp.maximum(taper, jnp.array(1e-30, dtype=fp)))
     return log10_lbol + log10_taper
+
+
+# ---------------------------------------------------------------------------
+# Shock cooling + Arnett (Ni/Co decay) combined bolometric model
+# ---------------------------------------------------------------------------
+
+@citation_wrapper('https://ui.adsabs.harvard.edu/abs/2021ApJ...909..209P/abstract, '
+                  'https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
+@jit
+def shock_cooling_and_arnett_bolometric(time, log10_mass, log10_radius, log10_energy,
+                                        nn, delta, f_nickel, mej, vej,
+                                        kappa, kappa_gamma):
+    """
+    Combined bolometric light curve: shock cooling (Piro 2021) + Ni/Co decay (Arnett 1982).
+
+    The two components are summed in luminosity space (log-sum-exp), which is float32-safe.
+
+    :param time: source-frame time in days
+    :param log10_mass: log10 envelope mass in solar masses
+    :param log10_radius: log10 envelope radius in cm
+    :param log10_energy: log10 explosion energy in erg
+    :param nn: outer density power-law slope
+    :param delta: inner density power-law slope
+    :param f_nickel: nickel mass fraction
+    :param mej: total ejecta mass in solar masses
+    :param vej: ejecta velocity in km/s
+    :param kappa: optical opacity in cm^2/g
+    :param kappa_gamma: gamma-ray opacity in cm^2/g
+    :return: log10 of bolometric luminosity in erg/s
+    """
+    from redback_jax.models.supernova_models import arnett_bolometric
+
+    fp = time.dtype
+    log10_sc = shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy,
+                                        nn, delta, kappa)
+    log10_ar = arnett_bolometric(time, f_nickel=f_nickel, mej=mej, vej=vej,
+                                 kappa=kappa, kappa_gamma=kappa_gamma)
+
+    # log10(L1 + L2) = log10_max + log10(1 + 10^(log10_min - log10_max))
+    log10_max = jnp.maximum(log10_sc, log10_ar)
+    log10_min = jnp.minimum(log10_sc, log10_ar)
+    return log10_max + jnp.log10(
+        jnp.array(1.0, dtype=fp)
+        + jnp.power(jnp.array(10.0, dtype=fp), log10_min - log10_max)
+    )

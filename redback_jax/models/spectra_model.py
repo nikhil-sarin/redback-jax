@@ -11,7 +11,7 @@ Usage::
     out = magnetar_powered_spectra(
         redshift=0.1,
         lum_dist=dl_cm,
-        vej_kms=10000.0,
+        vej=10000.0,
         temperature_floor=3000.0,
         # remaining kwargs forwarded verbatim to the bolometric function:
         p0=2.0, bp=1.0, mass_ns=1.4, theta_pb=0.3,
@@ -52,7 +52,7 @@ def make_spectra_model(bolometric_fn):
 
     The returned function has signature::
 
-        spectra_model(redshift, lum_dist, vej_kms, temperature_floor,
+        spectra_model(redshift, lum_dist, vej, temperature_floor,
                       features=NO_SED_FEATURES, **bolometric_kwargs)
         -> namedtuple(time, lambdas, spectra)
 
@@ -67,13 +67,15 @@ def make_spectra_model(bolometric_fn):
     callable
         A spectra model with the same photosphere/SED pipeline.
     """
+    import inspect as _inspect
+    _bolo_accepts_vej = 'vej' in _inspect.signature(bolometric_fn).parameters
 
-    def spectra_model(redshift, lum_dist, vej_kms, temperature_floor,
+    def spectra_model(redshift, lum_dist, vej, temperature_floor,
                       features=NO_SED_FEATURES, **bolometric_kwargs):
         return _spectra_model_impl(
             bolometric_fn,
-            redshift, lum_dist, vej_kms, temperature_floor,
-            features, bolometric_kwargs,
+            redshift, lum_dist, vej, temperature_floor,
+            features, bolometric_kwargs, _bolo_accepts_vej,
         )
 
     spectra_model.__doc__ = (
@@ -81,7 +83,7 @@ def make_spectra_model(bolometric_fn):
         "Args:\\n"
         "    redshift: source redshift\\n"
         "    lum_dist: luminosity distance in cm\\n"
-        "    vej_kms: ejecta velocity for photosphere in km/s\\n"
+        "    vej: ejecta velocity in km/s (photosphere)\\n"
         "    temperature_floor: floor temperature in K\\n"
         "    features: SEDFeatures (default NO_SED_FEATURES)\\n"
         "    **bolometric_kwargs: forwarded to the bolometric function\\n\\n"
@@ -93,8 +95,9 @@ def make_spectra_model(bolometric_fn):
     return spectra_model
 
 
-def _spectra_model_impl(bolometric_fn, redshift, lum_dist, vej_kms,
-                         temperature_floor, features, bolometric_kwargs):
+def _spectra_model_impl(bolometric_fn, redshift, lum_dist, vej,
+                         temperature_floor, features, bolometric_kwargs,
+                         bolo_accepts_vej=False):
     """Inner implementation — log10-space SED pipeline for float32 safety."""
     lambda_observer_frame = jnp.geomspace(100.0, 60000.0, 100)
     time_temp = jnp.geomspace(0.1, 3000.0, 3000)          # days
@@ -107,13 +110,17 @@ def _spectra_model_impl(bolometric_fn, redshift, lum_dist, vej_kms,
     )
 
     # Bolometric luminosity in log10 erg/s (returned directly by all bolometric fns)
+    # If the bolometric function also accepts vej (e.g. arnett_bolometric uses it
+    # for diffusion), forward it — unless the caller already supplied it explicitly.
+    if bolo_accepts_vej:
+        bolometric_kwargs = {'vej': vej, **bolometric_kwargs}
     log10_lbol = bolometric_fn(time, **bolometric_kwargs)
 
     # Temperature and log10(radius) — both float32-safe
     T_ph, log10_r_ph = compute_temperature_floor_log10(
         time=time,
         log10_luminosity=log10_lbol,
-        vej=vej_kms,
+        vej=vej,
         temperature_floor=temperature_floor,
     )
 
