@@ -34,7 +34,8 @@ Redback-JAX reimplements redback's analytical transient models in JAX, using log
 | `metzger_kilonova_bolometric` | r-process ODE, 200 shells | Metzger 2017 |
 | `magnetar_boosted_kilonova_bolometric` | r-process ODE + magnetar injection | Yu+ 2013 |
 
-All bolometric functions return **`log10_lbol`** (log base-10 of luminosity in erg/s). This is the natural unit for GPU inference — float32 can represent log10 values for any physically realistic luminosity.
+All bolometric functions return **`log10_lbol`** (log base-10 of luminosity in erg/s). 
+This is the natural unit for GPU inference — float32 can represent log10 values for any physically realistic luminosity.
 
 ### Spectra pipeline
 
@@ -73,6 +74,7 @@ The `Prior` / `Likelihood` / `NestedSampler` / `MCMCSampler` API handles the ful
 import jax
 from redback_jax.inference import Prior, Uniform, Likelihood, NestedSampler, MCMCSampler
 from redback_jax.utils import luminosity_distance_cm
+from redback_jax.transient import Transient
 
 REDSHIFT = 0.01
 DL_CM    = luminosity_distance_cm(REDSHIFT)   # ~1.37e26 cm
@@ -85,6 +87,16 @@ prior = Prior([
     Uniform(3000,  12000,  name='vej'),
 ])
 
+# Similar to how you would load a transient for Redback — but with JAX arrays
+transient = Transient(
+    time=times_list,
+    y=mags_list,
+    y_err=y_err,
+    bands=bands_list,
+    data_mode='magnitude',
+    name='SN2019abcde',
+    redshift=REDSHIFT,
+)
 # Likelihood — transient.time (MJD), transient.y (AB mag), transient.y_err, transient.bands
 likelihood = Likelihood(
     model='arnett_spectra',
@@ -177,18 +189,34 @@ Core: `jax`, `numpy`, `scipy`, `pandas`, `matplotlib`, `astropy`, `wcosmo`
 
 Optional (inference): `blackjax`, `flowmc`, `optax`
 
-Optional (bandflux): `jax-bandflux` (`jax_supernovae`)
+
 
 ## Related Projects
 
 - [redback](https://github.com/nikhil-sarin/redback) — the original full-featured package
-- [fiestaEM](https://github.com/ThibeauWouters/fiestaEM) — similar JAX-based transient inference framework
+- [JAX-bandflux](https://github.com/samleeney/JAX-bandflux): `jax-bandflux`
 - [JAX](https://github.com/google/jax) — the underlying numerical computing library
 
 ## License
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
-## Acknowledgments
+## Acknowledgments/Citations
 
-Based on the original [redback](https://github.com/nikhil-sarin/redback) package. Please cite the redback paper if you use this software.
+Based on the original [redback](https://github.com/nikhil-sarin/redback) package. 
+
+If you use Redback-JAX, please cite the redback paper. 
+Please make sure you also cite all relevant papers for the models. 
+These are the same as the papers cited in the original redback package. 
+
+If you use magnitude/flux evaluation please also cite 
+- [JAX-bandflux](https://github.com/samleeney/JAX-bandflux): `jax-bandflux` and any other papers recommended by those authors.
+
+If you do any sampling, please cite the relevant sampling papers. 
+
+- [BlackJAX](https://github.com/blackjax-devs/blackjax): `blackjax` and any papers recommended by those authors.
+
+## Redback-JAX paper
+
+A paper describing the Redback-JAX package is in preparation. 
+Redback-JAX is still very much in development and the API/etc may not be stable. 
