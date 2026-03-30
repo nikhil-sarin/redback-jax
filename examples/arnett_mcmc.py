@@ -1,17 +1,18 @@
 """
-Quick Nested Sampling Test with Arnett Model
+MCMC sampling with the Arnett model using BlackJAX NUTS.
 
-Reduced settings for fast testing.  See arnett_ns.py for the full version.
+Fits the Arnett supernova model to fake multi-band photometry.
 
 Install requirements:
-    pip install git+https://github.com/handley-lab/blackjax@proposal wcosmo
+    pip install blackjax wcosmo
+
+Usage:
+    python arnett_mcmc.py
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-jax.config.update("jax_enable_x64", True)
 
 import wcosmo
 
@@ -19,7 +20,7 @@ from redback_jax.models import arnett_spectra
 from redback_jax.models.supernova_models import PLANCK18_H0, PLANCK18_OM0
 from redback_jax.sources import PrecomputedSpectraSource
 from redback_jax.transient import Transient
-from redback_jax.inference import Prior, Uniform, Likelihood, NestedSampler
+from redback_jax.inference import Prior, Uniform, Likelihood, MCMCSampler
 
 # ============================================================================
 # Setup
@@ -38,12 +39,12 @@ FIXED = {
     'kappa_gamma':       0.1,
 }
 
-BANDS          = ['bessellb', 'bessellv']
-N_OBS_PER_BAND = 8
+BANDS          = ['bessellb', 'bessellv', 'bessellr']
+N_OBS_PER_BAND = 12
 MAG_ERR        = 0.05
 
 # ============================================================================
-# Generate fake data
+# Generate fake observations
 # ============================================================================
 
 print("Generating fake data...")
@@ -57,7 +58,7 @@ obs_times_rel = jnp.linspace(5.0, 40.0, N_OBS_PER_BAND)
 obs_times_mjd = obs_times_rel + TRUE_PARAMS['t0']
 
 times_list, bands_list, mags_list = [], [], []
-rng = np.random.RandomState(0)
+rng = np.random.RandomState(7)
 
 for band in BANDS:
     bi = _band_to_idx[band]
@@ -77,9 +78,10 @@ transient = Transient(
     y_err=np.full(len(mags_list), MAG_ERR),
     bands=bands_list,
     data_mode='magnitude',
+    name='fake_arnett_SN',
     redshift=REDSHIFT,
 )
-print(f"  {len(transient.time)} observations")
+print(f"  {len(transient.time)} observations ({len(BANDS)} bands × {N_OBS_PER_BAND} epochs)")
 
 # ============================================================================
 # Inference
@@ -98,8 +100,13 @@ likelihood = Likelihood(
     fixed_params = FIXED,
 )
 
-result = NestedSampler(likelihood, prior, outdir=None, n_live=50, n_delete=10,
-                       num_mcmc_steps_multiplier=3).run(jax.random.PRNGKey(0))
+result = MCMCSampler(
+    likelihood, prior,
+    n_warmup=300,
+    n_samples=1000,
+    n_chains=4,
+).run(jax.random.PRNGKey(0))
+
 result.summary()
 
 print(f"\n{'Param':<12} {'True':>10}")

@@ -32,6 +32,11 @@ from .nested_sampler import (
     HAS_BLACKJAX,
 )
 
+from .mcmc_sampler import (
+    MCMCSampler,
+    MCMCResult,
+)
+
 # ------------------------------------------------------------------
 # Legacy API
 # ------------------------------------------------------------------
@@ -55,6 +60,8 @@ __all__ = [
     'Likelihood',
     'NestedSampler',
     'NSResult',
+    'MCMCSampler',
+    'MCMCResult',
     # Shared
     'HAS_BLACKJAX',
     # Legacy API

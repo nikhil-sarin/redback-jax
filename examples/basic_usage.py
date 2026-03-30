@@ -239,6 +239,7 @@ def example_data_from_file():
         transient = Transient.from_data_file(
             temp_filename,
             data_mode='flux',
+            y_err_col='flux_err',
             name='File Example'
         )
         

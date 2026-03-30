@@ -1,22 +1,15 @@
 """
-Nested Sampling with Arnett Model
+Quick Nested Sampling Test with Arnett Model
 
-Fits the Arnett supernova model to fake multi-band photometry.
+Reduced settings for fast testing.  See arnett_ns.py for the full version.
 
 Install requirements:
-    pip install git+https://github.com/handley-lab/blackjax@proposal
-    pip install anesthetic tqdm wcosmo
-
-Usage:
-    python arnett_ns.py
+    pip install git+https://github.com/handley-lab/blackjax@proposal wcosmo
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import matplotlib.pyplot as plt
-
-jax.config.update("jax_enable_x64", True)
 
 import wcosmo
 
@@ -43,12 +36,12 @@ FIXED = {
     'kappa_gamma':       0.1,
 }
 
-BANDS          = ['bessellb', 'bessellv', 'bessellr', 'besselli']
-N_OBS_PER_BAND = 15
+BANDS          = ['bessellb', 'bessellv']
+N_OBS_PER_BAND = 8
 MAG_ERR        = 0.05
 
 # ============================================================================
-# Generate fake observations
+# Generate fake data
 # ============================================================================
 
 print("Generating fake data...")
@@ -58,11 +51,11 @@ _out = arnett_spectra(**FIXED, vej=TRUE_PARAMS['vej'], f_nickel=TRUE_PARAMS['f_n
 _src = PrecomputedSpectraSource(phases=_out.time, wavelengths=_out.lambdas, flux_grid=_out.spectra)
 _bridges, _band_to_idx = _src.prepare_bridges(BANDS)
 
-obs_times_rel = jnp.linspace(5.0, 50.0, N_OBS_PER_BAND)  # source-frame days
+obs_times_rel = jnp.linspace(5.0, 40.0, N_OBS_PER_BAND)
 obs_times_mjd = obs_times_rel + TRUE_PARAMS['t0']
 
 times_list, bands_list, mags_list = [], [], []
-rng = np.random.RandomState(42)
+rng = np.random.RandomState(0)
 
 for band in BANDS:
     bi = _band_to_idx[band]
@@ -82,17 +75,16 @@ transient = Transient(
     y_err=np.full(len(mags_list), MAG_ERR),
     bands=bands_list,
     data_mode='magnitude',
-    name='fake_arnett_SN',
     redshift=REDSHIFT,
 )
-print(f"  {len(transient.time)} observations ({len(BANDS)} bands × {N_OBS_PER_BAND} epochs)")
+print(f"  {len(transient.time)} observations")
 
 # ============================================================================
 # Inference
 # ============================================================================
 
 prior = Prior([
-    Uniform(58580, 58620, name='t0'),
+    Uniform(58585, 58615, name='t0'),
     Uniform(0.05,  0.20,  name='f_nickel'),
     Uniform(0.8,   2.0,   name='mej'),
     Uniform(3000,  8000,  name='vej'),
@@ -104,14 +96,11 @@ likelihood = Likelihood(
     fixed_params = FIXED,
 )
 
-result = NestedSampler(likelihood, prior, outdir='results/').run(jax.random.PRNGKey(42))
+result = NestedSampler(likelihood, prior, outdir=None, n_live=50, n_delete=10,
+                       num_mcmc_steps_multiplier=3).run(jax.random.PRNGKey(0))
 result.summary()
 
 print(f"\n{'Param':<12} {'True':>10}")
 print("-" * 25)
 for p in prior.names:
     print(f"{p:<12} {TRUE_PARAMS[p]:>10.4f}")
-
-NestedSampler(likelihood, prior, outdir='results/').plot_corner(
-    result, truth=TRUE_PARAMS, filename='results/corner.png'
-)

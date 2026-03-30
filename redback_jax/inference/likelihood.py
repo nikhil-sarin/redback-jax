@@ -40,8 +40,8 @@ import jax.numpy as jnp
 from typing import Dict, Optional
 
 from jax_supernovae.bandpasses import register_all_bandpasses
+from jax_supernovae.timeseries import timeseries_multiband_flux
 
-from redback_jax.sources import PrecomputedSpectraSource
 from redback_jax.models import get_model
 
 
@@ -101,21 +101,22 @@ class Likelihood:
 
     def _build_bridges(self, prior):
         """Precompute bandpass bridges using prior midpoints for free params."""
+        from jax_supernovae.bandpasses import get_bandpass
+        from jax_supernovae.salt3 import precompute_bandflux_bridge
+
         # Fill in free param midpoints so the dummy model call has all args
         dummy_kwargs = dict(self.fixed_params)
         for d in prior.distributions:
             if d.name != self.t0_key:
                 dummy_kwargs.setdefault(d.name, 0.5 * (d.low + d.high))
 
-        _dummy = self._model_fn(**dummy_kwargs)
-        _src   = PrecomputedSpectraSource(
-            phases=_dummy.time,
-            wavelengths=_dummy.lambdas,
-            flux_grid=_dummy.spectra,
+        self._dummy_out = self._model_fn(**dummy_kwargs)
+        self._bridges   = tuple(
+            precompute_bandflux_bridge(get_bandpass(b)) for b in self._unique_bands
         )
-        self._bridges, self._band_to_idx = _src.prepare_bridges(self._unique_bands)
+        band_to_idx = {b: i for i, b in enumerate(self._unique_bands)}
         self._obs_band_idx = jnp.array(
-            [self._band_to_idx[b] for b in self._bands_raw]
+            [band_to_idx[b] for b in self._bands_raw]
         )
 
     def _make_log_likelihood(self, prior):
@@ -134,6 +135,10 @@ class Likelihood:
         t0_key        = self.t0_key
         names         = prior.names
 
+        # zero_before flag and minphase from the dummy run (static scalars)
+        _zero_before = True
+        _minphase    = float(self._dummy_out.time[0])
+
         @jax.jit
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
             param_dict = {n: params[i] for i, n in enumerate(names)}
@@ -147,15 +152,17 @@ class Likelihood:
             model_kwargs = {**fixed_params, **param_dict}
             out = model_fn(**model_kwargs)
 
-            source = PrecomputedSpectraSource(
-                phases=out.time, wavelengths=out.lambdas, flux_grid=out.spectra
+            # Use timeseries_multiband_flux directly — avoids constructing a
+            # PrecomputedSpectraSource inside JIT (which calls np.asarray on
+            # traced arrays and is not JIT-safe).
+            model_fluxes = timeseries_multiband_flux(
+                t_source, bridges, obs_band_idx,
+                out.time, out.lambdas, out.spectra,
+                1.0, _zero_before, _minphase,
+                time_degree=1,
             )
-            model_mags = source.bandmag(
-                {'amplitude': 1.0}, None, t_source,
-                band_indices=obs_band_idx,
-                bridges=bridges,
-                unique_bands=unique_bands,
-            )
+            # Same conversion as PrecomputedSpectraSource._compute_bandmag_single
+            model_mags = -2.5 * jnp.log10(model_fluxes + 1e-100) - 48.60
             return -0.5 * jnp.sum(((obs_mags - model_mags) / obs_errs) ** 2)
 
         return _log_like

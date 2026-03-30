@@ -10,15 +10,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-
 import wcosmo
 
 from redback_jax.models import arnett_spectra
 from redback_jax.models.supernova_models import PLANCK18_H0, PLANCK18_OM0
 from redback_jax.sources import PrecomputedSpectraSource
 from redback_jax.transient import Transient
-from redback_jax.inference import Prior, Uniform, Likelihood, NestedSampler
+from redback_jax.inference import Prior, Uniform, Likelihood
 
 print("=" * 60)
 print("Nested Sampling Setup Test")
@@ -48,15 +46,10 @@ print(f"  time {out.time.shape}, spectra {out.spectra.shape}  [{_time.time()-t0:
 # ============================================================================
 print("\nTest 2: bandmag...")
 source = PrecomputedSpectraSource(phases=out.time, wavelengths=out.lambdas, flux_grid=out.spectra)
-bridges, band_to_idx = source.prepare_bridges(BANDS)
 test_times = jnp.linspace(5.0, 40.0, 8)
 
 for band in BANDS:
-    bi = band_to_idx[band]
-    mags = source.bandmag(
-        {'amplitude': 1.0}, None, test_times,
-        band_indices=jnp.array([bi] * 8), bridges=bridges, unique_bands=BANDS,
-    )
+    mags = source.bandmag({'amplitude': 1.0}, band, test_times)
     assert jnp.all(jnp.isfinite(mags)), f"Non-finite mags in {band}"
     print(f"  {band}: {float(mags.min()):.2f}–{float(mags.max()):.2f} mag")
 
@@ -71,11 +64,7 @@ times_list, bands_list, mags_list = [], [], []
 rng = np.random.RandomState(0)
 
 for band in BANDS:
-    bi = band_to_idx[band]
-    true_mags = source.bandmag(
-        {'amplitude': 1.0}, None, obs_times_rel,
-        band_indices=jnp.array([bi] * 8), bridges=bridges, unique_bands=BANDS,
-    )
+    true_mags = source.bandmag({'amplitude': 1.0}, band, obs_times_rel)
     noisy = np.array(true_mags) + rng.normal(0, 0.05, 8)
     times_list.extend(obs_times_mjd.tolist())
     bands_list.extend([band] * 8)
