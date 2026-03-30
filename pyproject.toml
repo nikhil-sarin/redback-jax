@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "redback-jax"
-version = "0.1.0"
+version = "0.3.0"
 description = "A lightweight JAX-only version of redback for electromagnetic transient analysis"
 readme = "README.md"
 license = {text = "GPL-3.0"}
