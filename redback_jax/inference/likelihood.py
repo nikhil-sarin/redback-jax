@@ -135,9 +135,12 @@ class Likelihood:
         t0_key        = self.t0_key
         names         = prior.names
 
-        # zero_before flag and minphase from the dummy run (static scalars)
+        # Static scalars from the dummy run
         _zero_before = True
         _minphase    = float(self._dummy_out.time[0])
+        # zp=0 per observation: timeseries_multiband_flux normalises each flux
+        # by the per-band AB zpbandflux so that -2.5*log10(result) = AB mag.
+        _zps = jnp.zeros(len(self._obs_mags))
 
         @jax.jit
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
@@ -152,17 +155,15 @@ class Likelihood:
             model_kwargs = {**fixed_params, **param_dict}
             out = model_fn(**model_kwargs)
 
-            # Use timeseries_multiband_flux directly — avoids constructing a
-            # PrecomputedSpectraSource inside JIT (which calls np.asarray on
-            # traced arrays and is not JIT-safe).
-            model_fluxes = timeseries_multiband_flux(
+            # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
+            # band, so -2.5*log10 gives the correct AB magnitude directly.
+            norm_fluxes = timeseries_multiband_flux(
                 t_source, bridges, obs_band_idx,
                 out.time, out.lambdas, out.spectra,
                 1.0, _zero_before, _minphase,
-                time_degree=1,
+                time_degree=1, zps=_zps, zpsys='ab',
             )
-            # Same conversion as PrecomputedSpectraSource._compute_bandmag_single
-            model_mags = -2.5 * jnp.log10(model_fluxes + 1e-100) - 48.60
+            model_mags = -2.5 * jnp.log10(norm_fluxes + 1e-100)
             return -0.5 * jnp.sum(((obs_mags - model_mags) / obs_errs) ** 2)
 
         return _log_like

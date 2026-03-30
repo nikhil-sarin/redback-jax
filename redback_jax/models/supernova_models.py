@@ -13,6 +13,7 @@ from scipy.interpolate import RegularGridInterpolator as _RGI
 from wcosmo import wcosmo
 
 from redback_jax.utils.citation_wrapper import citation_wrapper
+from redback_jax.utils.cosmology import PLANCK18_H0, PLANCK18_OM0, MPC_TO_CM
 from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import (
     diffusion_convert_luminosity,
@@ -29,7 +30,7 @@ _SPEED_OF_LIGHT = 2.998e10   # cm/s
 _KM_CGS        = 1.0e5       # cm/km
 _DAY_TO_S      = 86400.0     # s/day
 _AU_CGS        = 1.496e13    # cm/AU
-_MPC_TO_CM     = 3.0857e24   # cm/Mpc
+_MPC_TO_CM     = MPC_TO_CM   # cm/Mpc (from redback_jax.utils.cosmology)
 
 # Log10 of key constants (float32-safe pre-computation)
 _LOG10_MSUN    = _math.log10(_SOLAR_MASS)
@@ -65,10 +66,6 @@ _csm_Bf_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Bf_grid,
 _csm_Br_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Br_grid,
                        bounds_error=False, fill_value=None)
 
-
-# Planck18 cosmology defaults
-PLANCK18_H0 = 67.66  # km/s/Mpc
-PLANCK18_OM0 = 0.3111
 
 
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):

@@ -10,10 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import wcosmo
-
 from redback_jax.models import arnett_spectra
-from redback_jax.models.supernova_models import PLANCK18_H0, PLANCK18_OM0
+from redback_jax.utils import luminosity_distance_cm
 from redback_jax.sources import PrecomputedSpectraSource
 from redback_jax.transient import Transient
 from redback_jax.inference import Prior, Uniform, Likelihood
@@ -23,7 +21,7 @@ print("Nested Sampling Setup Test")
 print("=" * 60)
 
 REDSHIFT = 0.01
-LUM_DIST = wcosmo.luminosity_distance(REDSHIFT, PLANCK18_H0, PLANCK18_OM0).value * 3.085677581e24
+LUM_DIST = luminosity_distance_cm(REDSHIFT)
 BANDS    = ['bessellv', 'bessellr']
 FIXED    = {
     'redshift':          REDSHIFT,
