@@ -430,6 +430,51 @@ def _csm_engine(time, mej, csm_mass, vej, eta, rho, kappa, r0, nn, AA, Bf, Br,
     return lbol, r_photosphere, mass_csm_threshold
 
 
+@citation_wrapper('https://ui.adsabs.harvard.edu/abs/2018ApJS..236....6G/abstract')
+@jit
+def magnetar_nickel_bolometric(time, f_nickel, mej, p0, bp, mass_ns, theta_pb,
+                                kappa, kappa_gamma, vej):
+    """
+    Bolometric light curve powered by both a magnetar and Ni/Co radioactive decay
+    (Arnett diffusion). The two luminosity sources are added before diffusion.
+
+    Reference: Gomez et al. 2018 (https://ui.adsabs.harvard.edu/abs/2018ApJS..236....6G/abstract)
+
+    :param time: source-frame time in days
+    :param f_nickel: nickel mass fraction (M_Ni = f_nickel * mej)
+    :param mej: total ejecta mass in solar masses
+    :param p0: initial spin period in milliseconds
+    :param bp: polar B-field in units of 10^14 G
+    :param mass_ns: NS mass in solar masses
+    :param theta_pb: spin–B-field angle in radians
+    :param kappa: optical opacity in cm^2/g
+    :param kappa_gamma: gamma-ray opacity in cm^2/g
+    :param vej: ejecta velocity in km/s
+    :return: log10 of bolometric luminosity in erg/s
+    """
+    dense_times = jnp.linspace(0.01, time[-1] + 100.0, 1000)
+
+    # Ni/Co decay engine in log10 space
+    log10_nickel = _nickelcobalt_log10_engine(dense_times, f_nickel, mej)
+
+    # Magnetar spin-down engine in log10 space
+    log10_p0 = jnp.log10(jnp.maximum(p0, jnp.array(1e-10, dtype=time.dtype)))
+    log10_bp = jnp.log10(jnp.maximum(bp, jnp.array(1e-10, dtype=time.dtype)))
+    log10_mag = _magnetar_log10_lbol(dense_times, log10_p0, log10_bp, mass_ns, theta_pb)
+
+    # Add the two luminosity sources in log10 space (logsumexp-style, float32-safe)
+    fp = time.dtype
+    log10_max = jnp.maximum(log10_nickel, log10_mag)
+    log10_combined = log10_max + jnp.log10(
+        jnp.power(jnp.array(10.0, dtype=fp), log10_nickel - log10_max)
+        + jnp.power(jnp.array(10.0, dtype=fp), log10_mag - log10_max))
+
+    _, log10_lbol = diffusion_convert_luminosity(
+        time=time, dense_times=dense_times, log10_luminosity=log10_combined,
+        kappa=kappa, kappa_gamma=kappa_gamma, mej=mej, vej=vej)
+    return log10_lbol
+
+
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/2013ApJ...773...76C/abstract,'
                   'https://ui.adsabs.harvard.edu/abs/2017ApJ...849...70V/abstract,'
                   'https://ui.adsabs.harvard.edu/abs/2020RNAAS...4...16J/abstract')

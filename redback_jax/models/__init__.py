@@ -8,6 +8,7 @@ from .supernova_models import (
     arnett_with_features_cosmology,
     blackbody_to_flux_density,
     magnetar_powered_bolometric,
+    magnetar_nickel_bolometric,
     csm_interaction_bolometric,
 )
 
@@ -46,6 +47,7 @@ from .registry import MODEL_REGISTRY, register_model, get_model, load_plugins
 register_model("arnett_bolometric", arnett_bolometric)
 register_model("arnett_with_features_cosmology", arnett_with_features_cosmology)
 register_model("magnetar_powered_bolometric", magnetar_powered_bolometric)
+register_model("magnetar_nickel_bolometric", magnetar_nickel_bolometric)
 register_model("csm_interaction_bolometric", csm_interaction_bolometric)
 register_model("shock_cooling_bolometric", shock_cooling_bolometric)
 register_model("shocked_cocoon_bolometric", shocked_cocoon_bolometric)
@@ -57,6 +59,7 @@ register_model("magnetar_boosted_kilonova_bolometric", magnetar_boosted_kilonova
 # Pre-built spectra variants
 arnett_spectra                    = make_spectra_model(arnett_bolometric)
 magnetar_powered_spectra          = make_spectra_model(magnetar_powered_bolometric)
+magnetar_nickel_spectra           = make_spectra_model(magnetar_nickel_bolometric)
 csm_interaction_spectra           = make_spectra_model(csm_interaction_bolometric)
 shock_cooling_spectra             = make_spectra_model(shock_cooling_bolometric)
 shocked_cocoon_spectra            = make_spectra_model(shocked_cocoon_bolometric)
@@ -68,6 +71,7 @@ magnetar_boosted_kilonova_spectra = make_spectra_model(magnetar_boosted_kilonova
 # Register spectra models
 register_model("arnett_spectra",                    arnett_spectra)
 register_model("magnetar_powered_spectra",          magnetar_powered_spectra)
+register_model("magnetar_nickel_spectra",           magnetar_nickel_spectra)
 register_model("csm_interaction_spectra",           csm_interaction_spectra)
 register_model("shock_cooling_spectra",             shock_cooling_spectra)
 register_model("shocked_cocoon_spectra",            shocked_cocoon_spectra)
@@ -85,6 +89,7 @@ __all__ = [
     'arnett_with_features_cosmology',
     'blackbody_to_flux_density',
     'magnetar_powered_bolometric',
+    'magnetar_nickel_bolometric',
     'csm_interaction_bolometric',
     # Shock-powered models
     'shock_cooling_bolometric',
@@ -100,6 +105,7 @@ __all__ = [
     # Spectra variants
     'arnett_spectra',
     'magnetar_powered_spectra',
+    'magnetar_nickel_spectra',
     'csm_interaction_spectra',
     'shock_cooling_spectra',
     'shocked_cocoon_spectra',
