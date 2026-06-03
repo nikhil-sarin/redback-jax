@@ -49,6 +49,7 @@ import numpy as np
 try:
     import blackjax
     from blackjax.ns.utils import log_weights as _bj_log_weights
+    from blackjax.ns.utils import finalise as _bj_finalise
     HAS_BLACKJAX = True
 except ImportError:
     HAS_BLACKJAX = False
@@ -202,16 +203,22 @@ class NestedSampler:
                   f"{self.n_mcmc_steps} MCMC steps/iter, "
                   f"device: {jax.devices()[0]}")
 
+        # JIT the kernel step for GPU performance.
+        step = jax.jit(self._algo.step)
+
         dead = []
         if self.verbose and HAS_TQDM:
             pbar = _tqdm.tqdm(desc="Dead points", unit=" pts")
         else:
             pbar = None
 
-        while state.logZ_live - state.logZ > self.term_dlogz:
+        # logZ / logZ_live live on the evidence integrator in the current
+        # blackjax NS API; step() returns (state, NSInfo) where the NSInfo
+        # holds the dead points for this iteration.
+        while float(state.integrator.logZ_live - state.integrator.logZ) > self.term_dlogz:
             key, subkey = jax.random.split(key)
-            state, dead_point = self._algo.step(subkey, state)
-            dead.append(dead_point)
+            state, dead_info = step(subkey, state)
+            dead.append(dead_info)
             if pbar is not None:
                 pbar.update(self.n_delete)
 
@@ -219,37 +226,44 @@ class NestedSampler:
             pbar.close()
 
         if self.verbose:
-            print(f"\nlogZ = {state.logZ:.2f}")
+            print(f"\nlogZ = {float(state.integrator.logZ):.2f}")
 
-        # Collate dead points
-        dead_all = jax.tree.map(lambda *args: jnp.concatenate(args), *dead)
+        # Combine the per-iteration dead points with the final live points.
+        dead_all = _bj_finalise(state, dead)
 
-        # Compute log-weights and evidence
-        logw    = _bj_log_weights(key, dead_all)
-        logZs   = jax.scipy.special.logsumexp(logw, axis=0)
-        logZ    = float(logZs.mean()) if logZs.ndim > 0 else float(logZs)
+        # log_weights returns shape (n_points, n_mc): Monte-Carlo draws over
+        # the stochastic prior-volume shrinkage.  Marginalise for evidence and
+        # average for a single weight per point.
+        key, w_key = jax.random.split(key)
+        logw_mc = _bj_log_weights(w_key, dead_all)              # (n_points, n_mc)
+        logZs   = jax.scipy.special.logsumexp(logw_mc, axis=0)  # (n_mc,)
+        logZ    = float(logZs.mean())
+        logw    = logw_mc.mean(axis=-1)                         # (n_points,)
 
         if self.verbose:
-            if hasattr(logZs, 'std'):
-                print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
-            else:
-                print(f"log Z = {logZ:.2f}")
+            print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
 
-        # Convert dead-point particle array to per-parameter samples
-        # BlackJAX stores particles in dead_all.particles — shape (n_dead, n_params)
-        particles = dead_all.particles   # (n_dead, n_params)
+        # Per-parameter posterior samples.  Positions live on
+        # dead_all.particles.position — shape (n_points, n_params).
+        positions = dead_all.particles.position
         samples = {
-            name: particles[:, i]
+            name: positions[:, i]
             for i, name in enumerate(self.prior.names)
         }
 
-        # Save chains
-        if self.outdir is not None and HAS_JSN_UTILS:
+        # Save chains in anesthetic dead-birth format.
+        if self.outdir is not None:
             os.makedirs(self.outdir, exist_ok=True)
             chains_dir = os.path.join(self.outdir, 'chains')
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                _save_chains(dead_all, self.prior.names, root=chains_dir + '/chains')
+                logL       = np.asarray(dead_all.particles.loglikelihood)
+                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                table = np.column_stack([np.asarray(positions), logL, logL_birth])
+                np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
+                with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
+                    for name in self.prior.names:
+                        f.write(f"{name}\t{name}\n")
                 if self.verbose:
                     print(f"Chains saved to {chains_dir}/")
             except Exception as e:
@@ -292,14 +306,14 @@ class NestedSampler:
         if self.outdir is not None:
             chains_root = os.path.join(self.outdir, 'chains', 'chains')
 
-        if chains_root is not None and os.path.exists(chains_root + '.txt'):
+        if chains_root is not None and os.path.exists(chains_root + '_dead-birth.txt'):
             samples = read_chains(chains_root, columns=self.prior.names)
         else:
             # Fall back: build NestedSamples from raw arrays
             from anesthetic import NestedSamples
             data = {n: np.array(result.samples[n]) for n in self.prior.names}
-            data['logL'] = np.array(result.dead.logL)
-            data['logL_birth'] = np.array(result.dead.logL_birth)
+            data['logL'] = np.array(result.dead.particles.loglikelihood)
+            data['logL_birth'] = np.array(result.dead.particles.loglikelihood_birth)
             samples = NestedSamples(
                 data=data,
                 logL='logL',
