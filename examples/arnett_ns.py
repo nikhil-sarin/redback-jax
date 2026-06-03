@@ -51,7 +51,6 @@ print("Generating fake data...")
 _out = arnett_spectra(**FIXED, vej=TRUE_PARAMS['vej'], f_nickel=TRUE_PARAMS['f_nickel'],
                       mej=TRUE_PARAMS['mej'])
 _src = PrecomputedSpectraSource(phases=_out.time, wavelengths=_out.lambdas, flux_grid=_out.spectra)
-_bridges, _band_to_idx = _src.prepare_bridges(BANDS)
 
 obs_times_rel = jnp.linspace(5.0, 50.0, N_OBS_PER_BAND)  # source-frame days
 obs_times_mjd = obs_times_rel + TRUE_PARAMS['t0']
@@ -60,12 +59,7 @@ times_list, bands_list, mags_list = [], [], []
 rng = np.random.RandomState(42)
 
 for band in BANDS:
-    bi = _band_to_idx[band]
-    true_mags = _src.bandmag(
-        {'amplitude': 1.0}, None, obs_times_rel,
-        band_indices=jnp.array([bi] * N_OBS_PER_BAND),
-        bridges=_bridges, unique_bands=BANDS,
-    )
+    true_mags = _src.bandmag({'amplitude': 1.0}, band, obs_times_rel)
     noisy = np.array(true_mags) + rng.normal(0, MAG_ERR, N_OBS_PER_BAND)
     times_list.extend(obs_times_mjd.tolist())
     bands_list.extend([band] * N_OBS_PER_BAND)

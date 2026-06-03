@@ -37,8 +37,8 @@ class TestPhenomenologicalModelsModule:
 
     def test_exp_rise_powerlaw_decline(self):
         """Test the exp_rise_powerlaw_decline function."""
-        time = [1.0, 5.0, 10.0, 20.0]
-        m_peak = [10.0, 15.0, 20.0]
+        time = jnp.array([1.0, 5.0, 10.0, 20.0])
+        m_peak = jnp.array([10.0, 15.0, 20.0])
 
         # Test a few different settings against ground truth from the non-JAX implementation.
         result = phenomenological_models.exp_rise_powerlaw_decline(
