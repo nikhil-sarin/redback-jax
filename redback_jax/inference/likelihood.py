@@ -131,7 +131,6 @@ class Likelihood:
             if d.name != self.t0_key:
                 dummy_kwargs.setdefault(d.name, 0.5 * (d.low + d.high))
 
-        self._dummy_out = self._model_fn(**dummy_kwargs)
         self._bridges   = tuple(
             precompute_bandflux_bridge(get_bandpass(b)) for b in self._unique_bands
         )
