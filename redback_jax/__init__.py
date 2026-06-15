@@ -5,7 +5,7 @@ This package provides JAX-based implementations for electromagnetic transient mo
 and Bayesian inference, focusing on performance and automatic differentiation capabilities.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __author__ = "Nikhil Sarin"
 __email__ = "nsarin.astro@gmail.com"
 
