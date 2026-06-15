@@ -14,7 +14,7 @@ def test_package_version():
     """Test that package version is accessible."""
     assert hasattr(redback_jax, '__version__')
     assert isinstance(redback_jax.__version__, str)
-    assert redback_jax.__version__ == "0.1.0"
+    assert redback_jax.__version__ == "0.4.0"
 
 
 def test_package_author():

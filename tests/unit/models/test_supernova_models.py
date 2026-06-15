@@ -69,6 +69,18 @@ def test_arnett_bolometric():
                         rtol=1e-3, atol=0.01)
 
 
+def test_arnett_bolometric_late_time_regression():
+    """Late-time Arnett luminosities stay close to the redback reference curve."""
+    times = jnp.array([100.0, 200.0, 300.0])
+
+    log10_lbol = arnett_bolometric(times, f_nickel=0.1, mej=1.0,
+                                    kappa=0.07, kappa_gamma=0.1, vej=5000)
+
+    expected_log10 = np.array([41.74246779, 41.05853531, 40.38642191])
+    assert jnp.allclose(log10_lbol, jnp.array(expected_log10, dtype=jnp.float32),
+                        rtol=5e-4, atol=5e-3)
+
+
 def test_arnett_bolometric_parameter_scaling():
     """Higher nickel fraction and mass give higher peak luminosity."""
     times = jnp.array([5.0, 10.0, 20.0, 30.0])

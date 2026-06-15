@@ -16,6 +16,7 @@ from redback_jax.utils.citation_wrapper import citation_wrapper
 from redback_jax.utils.cosmology import PLANCK18_H0, PLANCK18_OM0, MPC_TO_CM
 from redback_jax.conversions import calc_kcorrected_properties, lambda_to_nu
 from redback_jax.interaction_processes import (
+    _compute_diffusion_constants,
     diffusion_convert_luminosity,
     csm_diffusion_convert_luminosity,
 )
@@ -43,6 +44,9 @@ _LOG10_KM_CGS  = _math.log10(_KM_CGS)
 _LOG10_EROT_COEFF = _math.log10(2.6e52)
 _LOG10_TP_COEFF   = _math.log10(1.3e5)
 _LOG10_2_FLOAT    = _math.log10(2.0)
+_ARNETT_HALF_TIMESTEPS = 50
+_ARNETT_MIN_LOG_SPACING = -3.0
+_ARNETT_START_DAY = 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +116,58 @@ def _nickelcobalt_log10_engine(time, f_nickel, mej):
     return log10_mni + log10_sum
 
 
+@jit
+def _redback_arnett_quadrature_nodes(tau_diff_days, max_time_days):
+    """Build the same adaptive log-mirror nodes used by redback's diffusion path."""
+    fp = tau_diff_days.dtype
+    min_ratio = jnp.maximum(
+        tau_diff_days / jnp.maximum(max_time_days, jnp.array(1e-30, dtype=fp)),
+        jnp.array(1e-30, dtype=fp),
+    )
+    log_min = jnp.log10(min_ratio) + jnp.array(_ARNETT_MIN_LOG_SPACING, dtype=fp)
+    lsp = jnp.power(
+        jnp.array(10.0, dtype=fp),
+        jnp.linspace(log_min, jnp.array(0.0, dtype=fp), _ARNETT_HALF_TIMESTEPS),
+    )
+    return jnp.sort(jnp.concatenate((lsp, 1.0 - lsp)))
+
+
+@jit
+def _diffused_nickelcobalt_log10_luminosity(time, f_nickel, mej, *, vej, kappa, kappa_gamma):
+    """
+    Specialized Arnett diffusion that evaluates the Ni/Co engine directly at the
+    redback quadrature points instead of interpolating a dense precomputed grid.
+    """
+    fp = time.dtype
+    eval_time = jnp.maximum(time, jnp.array(_ARNETT_START_DAY, dtype=fp))
+    tb = jnp.array(_ARNETT_START_DAY, dtype=fp)
+    dense_end = eval_time[-1] + jnp.array(100.0, dtype=fp)
+
+    log10_td, log10_A = _compute_diffusion_constants(
+        jnp.log10(jnp.maximum(jnp.asarray(kappa, dtype=fp), jnp.array(1e-30, dtype=fp))),
+        jnp.log10(jnp.maximum(jnp.asarray(kappa_gamma, dtype=fp), jnp.array(1e-30, dtype=fp))),
+        jnp.log10(jnp.maximum(jnp.asarray(mej, dtype=fp), jnp.array(1e-30, dtype=fp))),
+        jnp.log10(jnp.maximum(jnp.asarray(vej, dtype=fp), jnp.array(1e-30, dtype=fp))),
+    )
+    tau_diff = jnp.power(jnp.array(10.0, dtype=fp), log10_td)
+    trap_coeff = jnp.power(jnp.array(10.0, dtype=fp), log10_A)
+    quad_nodes = _redback_arnett_quadrature_nodes(tau_diff, dense_end)
+
+    int_times = jnp.clip(tb + (eval_time[:, None] - tb) * quad_nodes[None, :], tb, dense_end)
+    log10_engine = _nickelcobalt_log10_engine(int_times, f_nickel, mej)
+    log10_scale = _nickelcobalt_log10_engine(jnp.array([tb], dtype=fp), f_nickel, mej)[0]
+    engine_n = jnp.power(jnp.array(10.0, dtype=fp), log10_engine - log10_scale)
+
+    exponent = jnp.clip((int_times ** 2 - eval_time[:, None] ** 2) / tau_diff ** 2, -80.0, 0.0)
+    integrand = engine_n * int_times * jnp.exp(exponent)
+    integral = jnp.trapezoid(integrand, int_times, axis=1)
+    trap_factor = -jnp.expm1(
+        -trap_coeff / jnp.maximum(eval_time ** 2, jnp.array(1e-30, dtype=fp))
+    )
+    lum_n = jnp.maximum(2.0 / tau_diff ** 2 * integral * trap_factor, 0.0)
+    return jnp.log10(jnp.maximum(lum_n, jnp.array(1e-30, dtype=fp))) + log10_scale
+
+
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
 @jit
 def arnett_bolometric(time, f_nickel, mej, *, vej=None, kappa=None, kappa_gamma=None):
@@ -126,12 +182,8 @@ def arnett_bolometric(time, f_nickel, mej, *, vej=None, kappa=None, kappa_gamma=
     :param vej: ejecta velocity in km/s (required)
     :return: log10 of bolometric luminosity in erg/s
     """
-    dense_times = jnp.linspace(0.01, time[-1] + 100.0, 1000)
-    log10_dense_lbols = _nickelcobalt_log10_engine(dense_times, f_nickel, mej)
-    _, log10_lum = diffusion_convert_luminosity(
-        time=time, dense_times=dense_times, log10_luminosity=log10_dense_lbols,
-        mej=mej, kappa=kappa, kappa_gamma=kappa_gamma, vej=vej)
-    return log10_lum
+    return _diffused_nickelcobalt_log10_luminosity(
+        time, f_nickel, mej, vej=vej, kappa=kappa, kappa_gamma=kappa_gamma)
 
 
 @citation_wrapper('https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
@@ -164,23 +216,8 @@ def arnett_with_features_lum_dist(
         time=time_observer_frame,
     )
 
-    # Compute log10(lbol) directly in log10 space (float32-safe)
-    dense_times = jnp.linspace(0.01, time[-1] + 100.0, 1000)
-    log10_ni = _math.log10(6.45e43)
-    log10_co = _math.log10(1.45e43)
-    ni56_life = 8.8; co56_life = 111.3
-    log10_a = log10_ni + (-dense_times / ni56_life) * _math.log10(_math.e)
-    log10_b = log10_co + (-dense_times / co56_life) * _math.log10(_math.e)
-    log10_max_ab = jnp.maximum(log10_a, log10_b)
-    log10_sum    = log10_max_ab + jnp.log10(
-        jnp.power(10.0, log10_a - log10_max_ab)
-        + jnp.power(10.0, log10_b - log10_max_ab))
-    log10_mni = jnp.log10(jnp.maximum(f_nickel * mej, 1e-30))
-    log10_dense = log10_mni + log10_sum
-
-    _, log10_lbol = diffusion_convert_luminosity(
-        time=time, dense_times=dense_times, log10_luminosity=log10_dense,
-        mej=mej, kappa=kappa, kappa_gamma=kappa_gamma, vej=vej)
+    log10_lbol = _diffused_nickelcobalt_log10_luminosity(
+        time, f_nickel, mej, vej=vej, kappa=kappa, kappa_gamma=kappa_gamma)
 
     T_ph, log10_r_ph = compute_temperature_floor_log10(
         time=time, log10_luminosity=log10_lbol,

@@ -64,6 +64,13 @@ class Likelihood:
         When present in the prior the likelihood converts ``transient.time``
         from observer-frame MJD to source-frame days automatically.
         Set to ``None`` if times are already in source-frame days.
+    evaluation_mode : {"full", "compact_source", "direct_photometry"}, optional
+        ``"full"`` preserves the existing model-default source grid.
+        ``"compact_source"`` uses a dataset-specific source phase grid while
+        still going through ``jax_supernovae.timeseries_multiband_flux``.
+        ``"direct_photometry"`` bypasses full source-cube materialization for
+        factory-built blackbody spectra models and integrates directly through
+        the bandpasses.
     """
 
     def __init__(
@@ -72,6 +79,9 @@ class Likelihood:
         transient,
         fixed_params: Dict,
         t0_key: Optional[str] = 't0',
+        evaluation_mode: str = 'full',
+        compact_time_grid_size: int = 256,
+        compact_grid_pad_days: float = 5.0,
     ):
         register_all_bandpasses()
 
@@ -85,6 +95,9 @@ class Likelihood:
         self.transient    = transient
         self.fixed_params = dict(fixed_params)
         self.t0_key       = t0_key
+        self.evaluation_mode = evaluation_mode
+        self.compact_time_grid_size = int(compact_time_grid_size)
+        self.compact_grid_pad_days = float(compact_grid_pad_days)
 
         self._obs_times    = jnp.asarray(transient.time)
         self._obs_mags     = jnp.asarray(transient.y)
@@ -96,8 +109,16 @@ class Likelihood:
         self._bridges      = None
         self._band_to_idx  = None
         self._redshift_const = float(self.fixed_params.get('redshift', 0.0))
+        self._compact_time_observer_grid = None
+        self._minphase = None
 
         self._bands_raw = bands_raw
+
+        valid_modes = {'full', 'compact_source', 'direct_photometry'}
+        if self.evaluation_mode not in valid_modes:
+            raise ValueError(
+                f"evaluation_mode must be one of {sorted(valid_modes)}, got {evaluation_mode!r}"
+            )
 
     def _build_bridges(self, prior):
         """Precompute bandpass bridges using prior midpoints for free params."""
@@ -118,6 +139,52 @@ class Likelihood:
         self._obs_band_idx = jnp.array(
             [band_to_idx[b] for b in self._bands_raw]
         )
+        self._band_to_idx = band_to_idx
+
+        if self.evaluation_mode == 'full':
+            self._dummy_out = self._model_fn(**dummy_kwargs)
+            self._minphase = float(self._dummy_out.time[0])
+        elif self.evaluation_mode == 'compact_source':
+            if not getattr(self._model_fn, '_redback_jax_supports_custom_grids', False):
+                raise ValueError(
+                    f"Model {self.model_name!r} does not support compact_source evaluation"
+                )
+            self._compact_time_observer_grid = self._build_compact_time_observer_grid(prior)
+            self._dummy_out = self._model_fn(
+                _time_observer_frame_grid=self._compact_time_observer_grid,
+                **dummy_kwargs,
+            )
+            self._minphase = float(self._compact_time_observer_grid[0])
+        else:
+            direct_fn = getattr(self._model_fn, '_redback_jax_direct_photometry', None)
+            if direct_fn is None:
+                raise ValueError(
+                    f"Model {self.model_name!r} does not support direct_photometry evaluation"
+                )
+
+    def _build_compact_time_observer_grid(self, prior):
+        """Build an observer-frame phase grid covering the whole dataset support."""
+        redshift = self._redshift_const
+        obs_min = float(jnp.min(self._obs_times))
+        obs_max = float(jnp.max(self._obs_times))
+
+        t0_dist = None
+        if self.t0_key is not None:
+            for dist in prior.distributions:
+                if dist.name == self.t0_key:
+                    t0_dist = dist
+                    break
+
+        if t0_dist is None:
+            source_min = obs_min
+            source_max = obs_max
+        else:
+            source_min = (obs_min - t0_dist.high) / (1.0 + redshift)
+            source_max = (obs_max - t0_dist.low) / (1.0 + redshift)
+
+        source_lo = max(0.1, source_min - self.compact_grid_pad_days)
+        source_hi = max(source_lo * 1.001, source_max + self.compact_grid_pad_days)
+        return jnp.geomspace(source_lo, source_hi, self.compact_time_grid_size) * (1.0 + redshift)
 
     def _make_log_likelihood(self, prior):
         """Return a JIT-compiled log-likelihood function ``(params,) -> scalar``."""
@@ -130,14 +197,16 @@ class Likelihood:
         obs_errs      = self._obs_errs
         obs_band_idx  = self._obs_band_idx
         bridges       = self._bridges
-        unique_bands  = self._unique_bands
         redshift      = self._redshift_const
         t0_key        = self.t0_key
         names         = prior.names
+        evaluation_mode = self.evaluation_mode
+        compact_time_grid = self._compact_time_observer_grid
+        direct_photometry_fn = getattr(self._model_fn, '_redback_jax_direct_photometry', None)
 
         # Static scalars from the dummy run
         _zero_before = True
-        _minphase    = float(self._dummy_out.time[0])
+        _minphase    = self._minphase
         # zp=0 per observation: timeseries_multiband_flux normalises each flux
         # by the per-band AB zpbandflux so that -2.5*log10(result) = AB mag.
         _zps = jnp.zeros(len(self._obs_mags))
@@ -153,16 +222,30 @@ class Likelihood:
                 t_source = obs_times
 
             model_kwargs = {**fixed_params, **param_dict}
-            out = model_fn(**model_kwargs)
+            if evaluation_mode == 'direct_photometry':
+                norm_fluxes = direct_photometry_fn(
+                    obs_source_time=t_source,
+                    obs_band_idx=obs_band_idx,
+                    bridges=bridges,
+                    **model_kwargs,
+                )
+            else:
+                if evaluation_mode == 'compact_source':
+                    out = model_fn(
+                        _time_observer_frame_grid=compact_time_grid,
+                        **model_kwargs,
+                    )
+                else:
+                    out = model_fn(**model_kwargs)
 
-            # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
-            # band, so -2.5*log10 gives the correct AB magnitude directly.
-            norm_fluxes = timeseries_multiband_flux(
-                t_source, bridges, obs_band_idx,
-                out.time, out.lambdas, out.spectra,
-                1.0, _zero_before, _minphase,
-                time_degree=1, zps=_zps, zpsys='ab',
-            )
+                # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
+                # band, so -2.5*log10 gives the correct AB magnitude directly.
+                norm_fluxes = timeseries_multiband_flux(
+                    t_source, bridges, obs_band_idx,
+                    out.time, out.lambdas, out.spectra,
+                    1.0, _zero_before, _minphase,
+                    time_degree=1, zps=_zps, zpsys='ab',
+                )
             model_mags = -2.5 * jnp.log10(norm_fluxes + 1e-100)
             return -0.5 * jnp.sum(((obs_mags - model_mags) / obs_errs) ** 2)
 
@@ -172,5 +255,6 @@ class Likelihood:
         return (
             f"Likelihood(model={self.model_name!r}, "
             f"n_obs={len(self._obs_mags)}, "
-            f"bands={self._unique_bands})"
+            f"bands={self._unique_bands}, "
+            f"evaluation_mode={self.evaluation_mode!r})"
         )

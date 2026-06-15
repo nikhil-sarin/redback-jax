@@ -108,6 +108,7 @@ likelihood = Likelihood(
         'kappa':             0.07,
         'kappa_gamma':       0.1,
     },
+    evaluation_mode='direct_photometry',  # opt-in fast path for fitting
 )
 
 # Nested sampling (BlackJAX)
@@ -120,6 +121,56 @@ mcmc_result = MCMCSampler(likelihood, prior, n_warmup=500, n_samples=2000, n_cha
 )
 mcmc_result.summary()
 ```
+
+### Fast photometric inference modes
+
+`Likelihood` now has **opt-in** fast evaluation modes for GPU fitting. The
+default remains `evaluation_mode="full"`, so existing source-model behaviour is
+unchanged.
+
+| Mode | What it does | Keeps `jax_supernovae.timeseries_multiband_flux`? | Best use |
+|---|---|---|---|
+| `full` | Uses the model's default full source grid | Yes | Backward-compatible default |
+| `compact_source` | Uses a dataset-specific source phase grid for the likelihood | Yes | Faster fitting while keeping the source-cube infrastructure |
+| `direct_photometry` | Integrates the blackbody model directly through the precomputed bandpasses | No | Fastest photometric fitting path |
+
+Notes:
+
+- `compact_source` is inference-only and does **not** change the model defaults.
+- `direct_photometry` is currently available for spectra models built with
+  `make_spectra_model(...)`, including `arnett_spectra`.
+- These are fitting accelerators; if you need a reusable source or exported
+  spectra, keep using the full spectra path.
+
+#### Example: switching between modes
+
+```python
+full_like = Likelihood(
+    model='arnett_spectra',
+    transient=transient,
+    fixed_params=FIXED,
+    evaluation_mode='full',
+)
+
+compact_like = Likelihood(
+    model='arnett_spectra',
+    transient=transient,
+    fixed_params=FIXED,
+    evaluation_mode='compact_source',
+    compact_time_grid_size=256,
+    compact_grid_pad_days=5.0,
+)
+
+fast_like = Likelihood(
+    model='arnett_spectra',
+    transient=transient,
+    fixed_params=FIXED,
+    evaluation_mode='direct_photometry',
+)
+```
+
+See `examples/arnett_ns_fast.py` for a complete nested-sampling example using
+the fast path.
 
 ### Available models
 

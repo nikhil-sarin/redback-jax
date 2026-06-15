@@ -48,7 +48,7 @@ def _build_log_mirror_quad(n_half=50, minimum_log_spacing=-3):
     xm  = _np.unique(_np.concatenate((lsp, 1.0 - lsp)))
     return jnp.array(xm, dtype=jnp.float32)
 
-_ARNETT_QUAD_NODES = _build_log_mirror_quad(n_half=50)
+_ARNETT_QUAD_NODES = _build_log_mirror_quad(n_half=20)
 _CSM_QUAD_NODES    = _build_log_mirror_quad(n_half=250)
 
 

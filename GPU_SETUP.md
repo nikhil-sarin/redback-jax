@@ -138,4 +138,30 @@ mixes poorly as written: it uses a fixed NUTS step size with no
 `window_adaptation` and hard `-inf` prior boundaries, so chains pin against the
 prior edges. Treat its output as indicative only unless the NUTS warmup is
 improved.
+
+## Fast likelihood modes for GPU fitting
+
+The default `Likelihood(..., evaluation_mode="full")` keeps the original
+source-model behaviour, but there are now two **opt-in** fitting accelerators:
+
+1. `evaluation_mode="compact_source"` — still uses
+   `jax_supernovae.timeseries_multiband_flux`, but builds the source on a
+   dataset-specific phase grid instead of the model's large default grid.
+2. `evaluation_mode="direct_photometry"` — bypasses full source-cube
+   materialization and integrates the blackbody model directly through the
+   precomputed bandpasses. This is currently the fastest path for
+   `arnett_spectra` photometric inference.
+
+Example:
+
+```python
+likelihood = Likelihood(
+    model='arnett_spectra',
+    transient=transient,
+    fixed_params=FIXED,
+    evaluation_mode='direct_photometry',
+)
 ```
+
+If you want to keep the full `jax_supernovae` source/interpolation path, use
+`compact_source` instead. The defaults are unchanged either way.
