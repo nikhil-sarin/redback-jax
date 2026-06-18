@@ -17,7 +17,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from redback_jax.models.general_magnetar import (
+from redback_jax.models import (
     general_magnetar_driven_supernova_bolometric,
     general_magnetar_driven_supernova_bolometric_batched,
 )
@@ -166,12 +166,17 @@ def test_batched_output_finite():
 
 
 def test_batched_agrees_with_single():
-    """Each row of the batched output must match the single-sample model."""
+    """Each row of the batched output must match the single-sample Euler model.
+
+    The batched function uses the fixed-step Euler backend; compare against the
+    single-call function with the same backend (solver='euler') so the two paths
+    are numerically identical rather than differing by ODE solver tolerance.
+    """
     out_batch = np.array(
         general_magnetar_driven_supernova_bolometric_batched(_TIMES, **_BATCH_PARAMS)
     )
     out_single = np.array(
-        general_magnetar_driven_supernova_bolometric(_TIMES, **_PARAMS)
+        general_magnetar_driven_supernova_bolometric(_TIMES, **_PARAMS, solver='euler')
     )
     # All rows should be identical since all batch elements have the same params
     for i in range(_B):
@@ -225,8 +230,6 @@ def test_agreement_with_redback():
     requested times and allow for up to 0.05 dex (≈ 12%) error.
     """
     try:
-        import sys
-        sys.path.insert(0, '/Volumes/Home/steve/anaconda3/envs/redback/lib/python3.11/site-packages')
         from redback.transient_models.supernova_models import (
             general_magnetar_driven_supernova_bolometric as redback_fn,
         )

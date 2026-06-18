@@ -104,7 +104,8 @@ def cutoff_blackbody_norm(
     tp    = temperature[:, None]                    # (N, 1)
     z     = nxcs / (lc * tp)                       # (N, 10): nX/(T·λ_c)
 
-    alpha = jnp.asarray(alpha_uv, dtype=fp)
+    # Clamp to [0, 3.99]: Γ(4-α) is singular for α ≥ 4 (order ≤ 0).
+    alpha = jnp.clip(jnp.asarray(alpha_uv, dtype=fp), 0.0, 3.99)
     order = jnp.asarray(4.0, dtype=fp) - alpha     # Γ(4-α, z) order
 
     # Generalised blue-side term: T^{3-α} / (nX^{4-α} · λ_c^α) · Γ(4-α, z)
@@ -207,7 +208,8 @@ def cutoff_blackbody_flux_density(
     # --- SED (two branches on wavelength vs. cutoff) --------------------------
     # λ ≥ λ_c: standard Planck r²/λ⁵ / expm1(x)
     # λ < λ_c: suppressed by (λ/λ_c)^alpha_uv → r²/(λ_c^α · λ^(5-α)) / expm1(x)
-    alpha = jnp.asarray(alpha_uv, dtype=fp)
+    # Clamp to [0, 3.99] — same guard as in cutoff_blackbody_norm.
+    alpha = jnp.clip(jnp.asarray(alpha_uv, dtype=fp), 0.0, 3.99)
     r2    = r_photosphere ** 2
     planck_r2 = jnp.where(
         lam_cm < lc,

@@ -329,9 +329,14 @@ class FluxDensityLikelihood:
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
             param_dict = {n: params[i] for i, n in enumerate(names)}
             F_pred = model(t, nu, **fixed, **param_dict)
-            # Return a very negative logL for ODE-failed regions (nan/inf flux)
-            chi2 = jnp.sum(((F_pred - F_obs) / F_err) ** 2)
-            return jnp.where(jnp.isfinite(chi2), -0.5 * chi2, -1e30)
+            # Replace non-finite flux with 0 before computing chi2 so that
+            # gradients stay finite through the jnp.where (both branches are
+            # always evaluated in JAX; NaN in the unused branch still propagates
+            # gradients).
+            is_finite = jnp.all(jnp.isfinite(F_pred))
+            F_pred_safe = jnp.where(is_finite, F_pred, jnp.zeros_like(F_pred))
+            chi2 = jnp.sum(((F_pred_safe - F_obs) / F_err) ** 2)
+            return jnp.where(is_finite, -0.5 * chi2, -1e30)
 
         # Trigger JIT compilation once with a valid sample from the prior
         dummy = prior.sample_n(jax.random.PRNGKey(0), 1)[0]

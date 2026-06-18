@@ -321,7 +321,7 @@ The only step that materialises linear values is the final bandflux integral ove
 ## Installation
 
 ```bash
-git clone https://github.com/steveschulze/redback-jax.git
+git clone https://github.com/nikhil-sarin/redback-jax.git
 cd redback-jax
 pip install -e .
 ```

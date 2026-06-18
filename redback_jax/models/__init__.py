@@ -110,6 +110,21 @@ if _SPECTRA_MODEL_AVAILABLE:
     register_model("tde_analytical_spectra",            tde_analytical_spectra)
     register_model("metzger_kilonova_spectra",          metzger_kilonova_spectra)
     register_model("magnetar_boosted_kilonova_spectra", magnetar_boosted_kilonova_spectra)
+else:
+    # When jax_supernovae is not installed these names must still exist in the
+    # module namespace (they are listed in __all__) to prevent AttributeError
+    # on wildcard imports or attribute access.
+    arnett_spectra                    = None
+    magnetar_powered_spectra          = None
+    magnetar_nickel_spectra           = None
+    csm_interaction_spectra           = None
+    shock_cooling_spectra             = None
+    shocked_cocoon_spectra            = None
+    shock_cooling_and_arnett_spectra  = None
+    tde_analytical_spectra            = None
+    metzger_kilonova_spectra          = None
+    magnetar_boosted_kilonova_spectra = None
+    general_magnetar_supernova_spectra_diffrax = None
 
 # Load any installed plugins (e.g. external model packages)
 load_plugins()

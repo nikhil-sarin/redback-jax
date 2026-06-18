@@ -618,7 +618,8 @@ def _make_scan_step(mej_g, kappa, kappa_gamma, f_nickel, fp):
         t_i, mag_i, dt_i = xs
 
         # ── 1. Old beta and doppler (from pre-update gamma) ──────────────────
-        beta_old   = jnp.sqrt(jnp.maximum(one - one / gamma ** 2, zero))
+        # Clamp to 1e-16 (not zero) so sqrt gradient stays finite near γ=1.
+        beta_old   = jnp.sqrt(jnp.maximum(one - one / gamma ** 2, jnp.array(1e-16, dtype=fp)))
         dop_old    = one / (gamma * jnp.maximum(one - beta_old, tiny))
 
         # ── 2. Euler update of state ──────────────────────────────────────────
@@ -1030,8 +1031,9 @@ def _magnetar_vf_diffrax(t, y, args):
     V     = jnp.maximum(V,     jnp.array(1e24, dtype=fp))
     E     = jnp.maximum(E,     jnp.array(1e30, dtype=fp))
 
-    # Current beta and Doppler factor
-    beta_sq = jnp.maximum(one - one / gamma ** 2, zero)
+    # Current beta and Doppler factor — clamp to 1e-16 so sqrt gradient stays
+    # finite when γ ≈ 1 (non-relativistic limit).
+    beta_sq = jnp.maximum(one - one / gamma ** 2, jnp.array(1e-16, dtype=fp))
     beta    = jnp.sqrt(beta_sq)
     dop     = one / (gamma * jnp.maximum(one - beta, tiny))
 
@@ -1151,10 +1153,13 @@ def _run_magnetar_ode_diffrax(
         jnp.asarray(nn,          dtype=fp),
     )
 
-    t0 = jnp.array(1.0,  dtype=fp)
+    # Set t0 dynamically so SaveAt times are never before t0 (diffrax raises
+    # ValueError if any save time falls outside [t0, t1]).
+    t0 = jnp.minimum(jnp.array(1.0, dtype=fp),
+                     time_s_sort[0] * jnp.array(0.9, dtype=fp))
     t1 = jnp.maximum(
         time_s_sort[-1] * jnp.array(1.001, dtype=fp),
-        jnp.array(2.0, dtype=fp),
+        t0 + jnp.array(1.0, dtype=fp),
     )
 
     solution = diffeqsolve(
