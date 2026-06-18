@@ -224,10 +224,12 @@ class Likelihood:
             param_dict = {n: params[i] for i, n in enumerate(names)}
 
             if t0_key is not None and t0_key in param_dict:
-                t0       = param_dict.pop(t0_key)
-                t_source = (obs_times - t0) / (1.0 + redshift)
+                t0             = param_dict.pop(t0_key)
+                t_source       = (obs_times - t0) / (1.0 + redshift)  # source-frame
+                t_obs_since_t0 = obs_times - t0                        # observer-frame
             else:
-                t_source = obs_times
+                t_source       = obs_times
+                t_obs_since_t0 = obs_times
 
             model_kwargs = {**fixed_params, **param_dict}
             if evaluation_mode == 'direct_photometry':
@@ -246,10 +248,10 @@ class Likelihood:
                 else:
                     out = model_fn(**model_kwargs)
 
-                # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
-                # band, so -2.5*log10 gives the correct AB magnitude directly.
+                # out.time is observer-frame days since explosion; query with the
+                # same convention so timeseries_multiband_flux interpolates correctly.
                 norm_fluxes = timeseries_multiband_flux(
-                    t_source, bridges, obs_band_idx,
+                    t_obs_since_t0, bridges, obs_band_idx,
                     out.time, out.lambdas, out.spectra,
                     1.0, _zero_before, _minphase,
                     time_degree=1, zps=_zps, zpsys='ab',
