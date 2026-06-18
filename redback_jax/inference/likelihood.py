@@ -331,12 +331,10 @@ class FluxDensityLikelihood:
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
             param_dict = {n: params[i] for i, n in enumerate(names)}
             F_pred = model(t, nu, **fixed, **param_dict)
-            # Replace non-finite flux with 0 before computing chi2 so that
-            # gradients stay finite through the jnp.where (both branches are
-            # always evaluated in JAX; NaN in the unused branch still propagates
-            # gradients).
+            # nan_to_num ensures NaN values cannot poison gradients via XLA's
+            # bitselect lowering of jnp.where, even when is_finite=False selects zeros.
             is_finite = jnp.all(jnp.isfinite(F_pred))
-            F_pred_safe = jnp.where(is_finite, F_pred, jnp.zeros_like(F_pred))
+            F_pred_safe = jnp.where(is_finite, jnp.nan_to_num(F_pred), jnp.zeros_like(F_pred))
             chi2 = jnp.sum(((F_pred_safe - F_obs) / F_err) ** 2)
             return jnp.where(is_finite, -0.5 * chi2, -1e30)
 

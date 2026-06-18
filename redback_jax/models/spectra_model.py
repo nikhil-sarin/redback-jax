@@ -260,9 +260,9 @@ def _cutoff_blackbody_freq_grid(
     def _one_time(lbol_i, T_i, r_i):
         return _cbd_fd(
             freq,
-            jnp.broadcast_to(lbol_i, (N_freq,)),
-            jnp.broadcast_to(T_i,    (N_freq,)),
-            jnp.broadcast_to(r_i,    (N_freq,)),
+            lbol_i[None],
+            T_i[None],
+            r_i[None],
             dl, lc, alp,
         )  # (N_freq,) mJy
 
