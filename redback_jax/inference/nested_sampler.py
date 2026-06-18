@@ -48,6 +48,7 @@ import numpy as np
 
 try:
     import blackjax
+    from blackjax.ns.adaptive import nss as _nss
     from blackjax.ns.utils import log_weights as _bj_log_weights
     from blackjax.ns.utils import finalise as _bj_finalise
     HAS_BLACKJAX = True
@@ -169,11 +170,11 @@ class NestedSampler:
         self._log_like_fn  = likelihood._make_log_likelihood(prior)
 
         # BlackJAX NS algorithm
-        self._algo = blackjax.nss(
+        self._algo = _nss(
             logprior_fn=self._log_prior_fn,
             loglikelihood_fn=self._log_like_fn,
-            num_inner_steps=self.n_mcmc_steps,
-            num_delete=self.n_delete,
+            num_mcmc_steps=self.n_mcmc_steps,
+            n_delete=self.n_delete,
         )
 
     # ------------------------------------------------------------------
@@ -212,21 +213,26 @@ class NestedSampler:
         else:
             pbar = None
 
-        # logZ / logZ_live live on the evidence integrator in the current
-        # blackjax NS API; step() returns (state, NSInfo) where the NSInfo
-        # holds the dead points for this iteration.
-        while float(state.integrator.logZ_live - state.integrator.logZ) > self.term_dlogz:
+        # Iterate until the remaining evidence contribution is negligible.
+        # Use do-while semantics: always run at least one step before checking
+        # the termination criterion. The initial state has logZ=-inf so the
+        # difference is nan and the criterion would fire spuriously otherwise.
+        while True:
             key, subkey = jax.random.split(key)
             state, dead_info = step(subkey, state)
             dead.append(dead_info)
             if pbar is not None:
                 pbar.update(self.n_delete)
+            logZ_live = float(state.sampler_state.logZ_live)
+            logZ      = float(state.sampler_state.logZ)
+            if np.isfinite(logZ_live) and np.isfinite(logZ) and (logZ_live - logZ) <= self.term_dlogz:
+                break
 
         if pbar is not None:
             pbar.close()
 
         if self.verbose:
-            print(f"\nlogZ = {float(state.integrator.logZ):.2f}")
+            print(f"\nlogZ = {float(state.sampler_state.logZ):.2f}")
 
         # Combine the per-iteration dead points with the final live points.
         dead_all = _bj_finalise(state, dead)
@@ -243,9 +249,9 @@ class NestedSampler:
         if self.verbose:
             print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
 
-        # Per-parameter posterior samples.  Positions live on
-        # dead_all.particles.position — shape (n_points, n_params).
-        positions = dead_all.particles.position
+        # Per-parameter posterior samples.  Positions are dead_all.particles
+        # — shape (n_points, n_params).
+        positions = dead_all.particles
         samples = {
             name: positions[:, i]
             for i, name in enumerate(self.prior.names)
@@ -257,8 +263,8 @@ class NestedSampler:
             chains_dir = os.path.join(self.outdir, 'chains')
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                logL       = np.asarray(dead_all.particles.loglikelihood)
-                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                logL       = np.asarray(dead_all.logL)
+                logL_birth = np.asarray(dead_all.logL_birth)
                 table = np.column_stack([np.asarray(positions), logL, logL_birth])
                 np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
                 with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
@@ -312,8 +318,8 @@ class NestedSampler:
             # Fall back: build NestedSamples from raw arrays
             from anesthetic import NestedSamples
             data = {n: np.array(result.samples[n]) for n in self.prior.names}
-            data['logL'] = np.array(result.dead.particles.loglikelihood)
-            data['logL_birth'] = np.array(result.dead.particles.loglikelihood_birth)
+            data['logL'] = np.array(result.dead.logL)
+            data['logL_birth'] = np.array(result.dead.logL_birth)
             samples = NestedSamples(
                 data=data,
                 logL='logL',

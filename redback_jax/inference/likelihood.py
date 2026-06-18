@@ -39,8 +39,12 @@ import jax
 import jax.numpy as jnp
 from typing import Dict, Optional
 
-from jax_supernovae.bandpasses import register_all_bandpasses
-from jax_supernovae.timeseries import timeseries_multiband_flux
+try:
+    from jax_supernovae.bandpasses import register_all_bandpasses
+    from jax_supernovae.timeseries import timeseries_multiband_flux
+    _HAS_JAX_SUPERNOVAE = True
+except ImportError:
+    _HAS_JAX_SUPERNOVAE = False
 
 from redback_jax.models import get_model
 
@@ -83,6 +87,11 @@ class Likelihood:
         compact_time_grid_size: int = 256,
         compact_grid_pad_days: float = 5.0,
     ):
+        if not _HAS_JAX_SUPERNOVAE:
+            raise ImportError(
+                "Likelihood requires jax_supernovae.\n"
+                "Use FluxDensityLikelihood for flux-density models instead."
+            )
         register_all_bandpasses()
 
         if isinstance(model, str):
@@ -256,4 +265,82 @@ class Likelihood:
             f"n_obs={len(self._obs_mags)}, "
             f"bands={self._unique_bands}, "
             f"evaluation_mode={self.evaluation_mode!r})"
+        )
+
+
+class FluxDensityLikelihood:
+    """Gaussian likelihood for models returning observed-frame flux density (mJy).
+
+    Designed for use with ``general_magnetar_driven_supernova_diffrax`` and any
+    other model with signature ``f(time, frequency, **params) -> jnp.ndarray``.
+    No ``jax_supernovae`` dependency — operates directly on flux residuals.
+
+    This class follows the same interface as :class:`Likelihood` and is fully
+    compatible with :class:`~redback_jax.inference.NestedSampler`.
+
+    Parameters
+    ----------
+    model : callable
+        ``f(time, frequency, **params) -> jnp.ndarray`` (mJy), where ``time``
+        is observer-frame days and ``frequency`` is observer-frame Hz.
+    time : array-like
+        Observer-frame times (days), shape ``(N,)``.
+    frequency : array-like
+        Observer-frame frequencies (Hz), shape ``(N,)``.
+    flux_obs : array-like
+        Observed flux density (mJy), shape ``(N,)``.
+    flux_err : array-like
+        Flux density uncertainties (mJy), shape ``(N,)``.
+    fixed_params : dict
+        Parameters held fixed during inference (e.g. ``luminosity_distance``,
+        ``redshift``, ``kappa``).
+    """
+
+    def __init__(self, model, time, frequency, flux_obs, flux_err, fixed_params):
+        self._model       = model
+        self._t           = jnp.array(time,      dtype=jnp.float64)
+        self._nu          = jnp.array(frequency,  dtype=jnp.float64)
+        self._F_obs       = jnp.array(flux_obs,   dtype=jnp.float64)
+        self._F_err       = jnp.array(flux_err,   dtype=jnp.float64)
+        self.fixed_params = dict(fixed_params)
+
+    def _make_log_likelihood(self, prior):
+        """Return a JIT-compiled log-likelihood ``(params_array,) -> scalar``.
+
+        Parameters
+        ----------
+        prior : Prior
+            The composite prior; used to extract ordered parameter names.
+
+        Returns
+        -------
+        callable
+            JIT-compiled function with signature ``(jnp.ndarray,) -> scalar``.
+        """
+        model  = self._model
+        t      = self._t
+        nu     = self._nu
+        F_obs  = self._F_obs
+        F_err  = self._F_err
+        fixed  = self.fixed_params
+        names  = prior.names
+
+        @jax.jit
+        def _log_like(params: jnp.ndarray) -> jnp.ndarray:
+            param_dict = {n: params[i] for i, n in enumerate(names)}
+            F_pred = model(t, nu, **fixed, **param_dict)
+            # Return a very negative logL for ODE-failed regions (nan/inf flux)
+            chi2 = jnp.sum(((F_pred - F_obs) / F_err) ** 2)
+            return jnp.where(jnp.isfinite(chi2), -0.5 * chi2, -1e30)
+
+        # Trigger JIT compilation once with a valid sample from the prior
+        dummy = prior.sample_n(jax.random.PRNGKey(0), 1)[0]
+        _log_like(dummy).block_until_ready()
+        return _log_like
+
+    def __repr__(self) -> str:
+        return (
+            f"FluxDensityLikelihood(model={self._model.__name__!r}, "
+            f"n_obs={len(self._F_obs)}, "
+            f"fixed={list(self.fixed_params.keys())})"
         )

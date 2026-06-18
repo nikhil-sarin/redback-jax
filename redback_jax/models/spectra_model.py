@@ -220,6 +220,159 @@ def _spectra_model_impl(bolometric_fn, redshift, lum_dist, vej,
     )
 
 
+# ---------------------------------------------------------------------------
+# CutoffBlackbody spectra factory  (for models where vej comes from the ODE)
+# ---------------------------------------------------------------------------
+
+def _cutoff_blackbody_freq_grid(
+    frequency,          # (N_freq,) source-frame Hz
+    log10_lbol,         # (N_time,) log10 erg/s
+    vej_kms,            # (N_time,) km/s
+    time,               # (N_time,) source-frame days
+    temperature_floor,  # scalar K
+    lum_dist,           # scalar cm
+    cutoff_wavelength_ang,   # scalar Å
+    alpha_uv,                # scalar, UV power-law index
+):
+    """CutoffBlackbody F_ν on a source-frame time × source-frame frequency grid.
+
+    Returns F_ν in erg/s/cm²/Hz, shape (N_time, N_freq).
+    Uses vmap over time steps; calls cutoff_blackbody_flux_density per step.
+    """
+    import jax
+    from redback_jax.sed import cutoff_blackbody_flux_density as _cbd_fd
+
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time=time,
+        log10_luminosity=log10_lbol,
+        vej=vej_kms,
+        temperature_floor=temperature_floor,
+    )
+    fp = log10_lbol.dtype
+    lbol = jnp.power(jnp.array(10.0, dtype=fp), log10_lbol)   # (N_time,) erg/s
+    r_ph = jnp.power(jnp.array(10.0, dtype=fp), log10_r_ph)   # (N_time,) cm
+    freq = frequency.astype(fp)                                 # (N_freq,)
+    dl   = jnp.asarray(lum_dist, dtype=fp)
+    lc   = jnp.asarray(cutoff_wavelength_ang, dtype=fp)
+    alp  = jnp.asarray(alpha_uv, dtype=fp)
+    N_freq = freq.shape[0]
+
+    def _one_time(lbol_i, T_i, r_i):
+        return _cbd_fd(
+            freq,
+            jnp.full(N_freq, lbol_i),
+            jnp.full(N_freq, T_i),
+            jnp.full(N_freq, r_i),
+            dl, lc, alp,
+        )  # (N_freq,) mJy
+
+    F_mjy = jax.vmap(_one_time)(lbol, T_ph, r_ph)   # (N_time, N_freq) mJy
+    return F_mjy * jnp.array(1e-26, dtype=fp)        # → erg/s/cm²/Hz
+
+
+def make_cutoff_spectra_model(bolometric_and_vej_fn,
+                               default_cutoff_wavelength=3000.0,
+                               default_alpha_uv=1.0):
+    """Wrap a (log10_lbol, vej_kms) bolometric function into a CutoffBlackbody spectra model.
+
+    Unlike ``make_spectra_model``, this factory:
+    - Expects the bolometric function to return ``(log10_lbol, vej_kms)`` (vej
+      is derived from the ODE, not a free parameter).
+    - Uses a CutoffBlackbody SED with user-controllable ``cutoff_wavelength``
+      and ``alpha_uv`` that can be placed in the inference prior.
+
+    Parameters
+    ----------
+    bolometric_and_vej_fn : callable
+        ``f(time_days, **kwargs) -> (log10_lbol, vej_kms)``.
+    default_cutoff_wavelength : float, Å  (default 3000)
+    default_alpha_uv : float  (default 1.0)
+
+    Returns
+    -------
+    spectra_model : callable
+        ``spectra_model(redshift, lum_dist, temperature_floor,
+                        cutoff_wavelength=..., alpha_uv=...,
+                        features=NO_SED_FEATURES, **bolometric_kwargs)``
+        returning ``namedtuple(time, lambdas, spectra)``.
+    """
+
+    def spectra_model(redshift, lum_dist, temperature_floor,
+                      cutoff_wavelength=default_cutoff_wavelength,
+                      alpha_uv=default_alpha_uv,
+                      features=NO_SED_FEATURES,
+                      _time_observer_frame_grid=None,
+                      _lambda_observer_frame_grid=None,
+                      **bolometric_kwargs):
+        return _cutoff_spectra_model_impl(
+            bolometric_and_vej_fn,
+            redshift, lum_dist, temperature_floor,
+            cutoff_wavelength, alpha_uv,
+            features, bolometric_kwargs,
+            time_observer_frame_grid=_time_observer_frame_grid,
+            lambda_observer_frame_grid=_lambda_observer_frame_grid,
+        )
+
+    spectra_model.__doc__ = (
+        f"CutoffBlackbody spectra model wrapping ``{bolometric_and_vej_fn.__name__}``.\n\n"
+        "Args:\n"
+        "    redshift: source redshift\n"
+        "    lum_dist: luminosity distance in cm\n"
+        "    temperature_floor: floor temperature in K\n"
+        "    cutoff_wavelength: UV cutoff wavelength in Å (default 3000, can be inferred)\n"
+        "    alpha_uv: UV power-law suppression index (default 1.0, can be inferred)\n"
+        "    features: SEDFeatures (default NO_SED_FEATURES)\n"
+        "    **bolometric_kwargs: forwarded to the bolometric+vej function\n\n"
+        "Returns:\n"
+        "    namedtuple with fields ``time`` (days), ``lambdas`` (Angstrom), "
+        "``spectra`` (erg/s/cm^2/Angstrom)\n"
+    )
+    spectra_model.__name__ = bolometric_and_vej_fn.__name__ + "_spectra"
+    spectra_model._redback_jax_bolometric_fn = bolometric_and_vej_fn
+    spectra_model._redback_jax_supports_custom_grids = True
+    return spectra_model
+
+
+def _cutoff_spectra_model_impl(bolometric_and_vej_fn, redshift, lum_dist,
+                                temperature_floor, cutoff_wavelength, alpha_uv,
+                                features, bolometric_kwargs,
+                                time_observer_frame_grid=None,
+                                lambda_observer_frame_grid=None):
+    """CutoffBlackbody spectra pipeline: grids → ODE (log10_lbol, vej) → SED → F_λ namedtuple."""
+    lambda_observer_frame, time_observer_frame, frequency, time = _build_spectra_grids(
+        redshift,
+        time_observer_frame_grid=time_observer_frame_grid,
+        lambda_observer_frame_grid=lambda_observer_frame_grid,
+    )
+
+    log10_lbol, vej_kms = bolometric_and_vej_fn(time, **bolometric_kwargs)
+
+    spectral_flux_density = _cutoff_blackbody_freq_grid(
+        frequency=frequency,
+        log10_lbol=log10_lbol,
+        vej_kms=vej_kms,
+        time=time,
+        temperature_floor=temperature_floor,
+        lum_dist=lum_dist,
+        cutoff_wavelength_ang=cutoff_wavelength,
+        alpha_uv=alpha_uv,
+    )
+
+    spectral_flux_density = apply_sed_feature(
+        features, spectral_flux_density, frequency, time)
+
+    fp = time.dtype
+    lam = lambda_observer_frame.astype(fp)
+    spectra = spectral_flux_density * jnp.array(_C_ANG, dtype=fp) / (lam[None, :] ** 2)
+    spectra = spectra * jnp.asarray(1.0 + redshift, dtype=fp)
+
+    return namedtuple('output', ['time', 'lambdas', 'spectra'])(
+        time=time_observer_frame,
+        lambdas=lambda_observer_frame,
+        spectra=spectra,
+    )
+
+
 def _direct_photometry_impl(bolometric_fn, *, obs_source_time, obs_band_idx, bridges,
                             redshift, lum_dist, vej, temperature_floor, features,
                             bolometric_kwargs, bolo_accepts_vej=False):

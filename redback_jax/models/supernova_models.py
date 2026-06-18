@@ -7,8 +7,10 @@ import os as _os
 from collections import namedtuple
 
 import numpy as _np
-from jax import jit
+import jax
+from jax import jit, lax
 import jax.numpy as jnp
+from functools import partial
 from scipy.interpolate import RegularGridInterpolator as _RGI
 from wcosmo import wcosmo
 
@@ -22,6 +24,10 @@ from redback_jax.interaction_processes import (
 )
 from redback_jax.models.sed_features import NO_SED_FEATURES, apply_sed_feature
 from redback_jax.photosphere import compute_temperature_floor_log10
+from redback_jax.sed import cutoff_blackbody_flux_density
+
+# Enable float64 — the general magnetar ODE state spans ~16 orders of magnitude.
+jax.config.update("jax_enable_x64", True)
 
 # ---------------------------------------------------------------------------
 # Physical constants — Python floats (not astropy, avoids float64 promotion)
@@ -47,6 +53,21 @@ _LOG10_2_FLOAT    = _math.log10(2.0)
 _ARNETT_HALF_TIMESTEPS = 50
 _ARNETT_MIN_LOG_SPACING = -3.0
 _ARNETT_START_DAY = 0.01
+
+# ---------------------------------------------------------------------------
+# General magnetar ODE constants (aliases onto the names used above + new values)
+# ---------------------------------------------------------------------------
+_C      = _SPEED_OF_LIGHT   # cm/s  (alias)
+_MSUN   = _SOLAR_MASS       # g     (alias)
+_DAY    = _DAY_TO_S         # s/day (alias)
+_MP     = 1.673e-24         # proton mass, g
+_ARAD   = 7.566e-15         # radiation constant a = 4σ/c, erg/cm³/K⁴
+_NI56_LUM  = 6.45e43        # Ni-56 specific luminosity, erg/s per M_sun
+_CO56_LUM  = 1.45e43        # Co-56 specific luminosity, erg/s per M_sun
+_NI56_LIFE = 8.8   * _DAY_TO_S   # Ni-56 e-folding time, s
+_CO56_LIFE = 111.3 * _DAY_TO_S   # Co-56 e-folding time, s
+_R0_CM  = 1.0e11            # initial ejecta radius, cm
+_N_ISM  = 1.0e-5            # ISM number density, cm⁻³
 
 
 # ---------------------------------------------------------------------------
@@ -548,3 +569,901 @@ def csm_interaction_bolometric(time, mej, csm_mass, vej, eta, rho, kappa, r0,
             kappa=kappa, r_photosphere=r_phot, mass_csm_threshold=mass_csm_thresh)
 
     return _engine_and_diffuse(time, dense_times_jnp)
+
+
+# ===========================================================================
+# General magnetar-driven supernova (relativistic ODE, float64)
+# Translated from redback's _ejecta_dynamics_and_interaction + magnetar_only
+# + TemperatureFloor + CutoffBlackbody (Sarin+22, Omand&Sarin+24, Nicholl+17)
+# ===========================================================================
+
+def _make_scan_step(mej_g, kappa, kappa_gamma, f_nickel, fp):
+    """Return a scan-compatible step function closed over the physical parameters.
+
+    All parameters are JAX arrays of dtype *fp* (float64).  The closure lets
+    ``jax.lax.scan`` treat them as compile-time constants within a JIT trace.
+    """
+    c        = jnp.array(_C,      dtype=fp)
+    m_p      = jnp.array(_MP,     dtype=fp)
+    a_rad    = jnp.array(_ARAD,   dtype=fp)
+    msun     = jnp.array(_MSUN,   dtype=fp)
+    ni56_lum  = jnp.array(_NI56_LUM,  dtype=fp)
+    co56_lum  = jnp.array(_CO56_LUM,  dtype=fp)
+    ni56_life = jnp.array(_NI56_LIFE, dtype=fp)
+    co56_life = jnp.array(_CO56_LIFE, dtype=fp)
+    n_ism    = jnp.array(_N_ISM,  dtype=fp)
+    pi       = jnp.array(jnp.pi,  dtype=fp)
+    one      = jnp.array(1.0,     dtype=fp)
+    zero     = jnp.array(0.0,     dtype=fp)
+    tiny     = jnp.array(1e-15,   dtype=fp)
+
+    # nickel mass in solar masses
+    nickel_msun = f_nickel * mej_g / msun
+
+    def scan_step(carry, xs):
+        """One explicit-Euler step, replicating _ejecta_dynamics_and_interaction.
+
+        The carry order is:
+          (gamma, r, V, E, prev_dgamma_dt, prev_drdt, prev_dV_dt, prev_dE_dt)
+
+        xs = (t_i, mag_lum_i, dt_i)
+
+        Convention (matching redback):
+          - beta and doppler are computed from the *old* gamma (pre-update).
+          - All spatial/energy state is then Euler-updated.
+          - Thermalisation efficiency uses the *updated* gamma (= vej after step).
+          - drdt uses old beta; dgamma uses updated gamma in denominator.
+        """
+        gamma, r, V, E, prev_dgamma, prev_drdt, prev_dV, prev_dE = carry
+        t_i, mag_i, dt_i = xs
+
+        # ── 1. Old beta and doppler (from pre-update gamma) ──────────────────
+        beta_old   = jnp.sqrt(jnp.maximum(one - one / gamma ** 2, zero))
+        dop_old    = one / (gamma * jnp.maximum(one - beta_old, tiny))
+
+        # ── 2. Euler update of state ──────────────────────────────────────────
+        gamma = gamma + prev_dgamma * dt_i
+        r     = r     + prev_drdt   * dt_i
+        V     = V     + prev_dV     * dt_i
+        E     = E     + prev_dE     * dt_i
+
+        # Safety clamps (keep state physical)
+        gamma = jnp.maximum(gamma, one + tiny)
+        r     = jnp.maximum(r,     jnp.array(1e8,  dtype=fp))
+        V     = jnp.maximum(V,     jnp.array(1e24, dtype=fp))
+        E     = jnp.maximum(E,     jnp.array(1e30, dtype=fp))
+
+        # ── 3. Physics on updated state (beta/doppler still old) ─────────────
+        swept_mass        = (jnp.array(4.0 / 3.0, dtype=fp)) * pi * r ** 3 * n_ism * m_p
+        comoving_pressure = E / (jnp.array(3.0, dtype=fp) * V)
+        t_comov           = dop_old * t_i                       # comoving time, s
+
+        # Ni/Co decay luminosity (comoving frame)
+        L_ni = nickel_msun * (
+            ni56_lum * jnp.exp(jnp.maximum(-t_comov / ni56_life, jnp.array(-700.0, dtype=fp)))
+            + co56_lum * jnp.exp(jnp.maximum(-t_comov / co56_life, jnp.array(-700.0, dtype=fp)))
+        )
+
+        # Optical depth
+        tau = kappa * (mej_g / V) * (r / gamma)
+
+        # Emitted luminosity and temperature (branched on optical depth)
+        r_ov_g    = r / gamma
+        tau_safe  = jnp.maximum(tau, tiny)
+        L_thin    = E * c / r_ov_g
+        L_thick   = E * c / (tau_safe * r_ov_g)
+        L_emit    = jnp.where(tau <= one, L_thin, L_thick)
+
+        T_thin    = (E / (a_rad * V)) ** jnp.array(0.25, dtype=fp)
+        T_thick   = (E / (a_rad * V * tau_safe)) ** jnp.array(0.25, dtype=fp)
+        T_comov   = jnp.where(tau <= one, T_thin, T_thick)
+
+        L_obs     = L_emit * dop_old ** 2          # Doppler boost to observer frame
+
+        # Thermalisation efficiency (uses *updated* gamma → new vej)
+        vej_new   = jnp.sqrt(jnp.maximum(one - one / gamma ** 2, zero)) * c
+        vej_safe  = jnp.maximum(vej_new, jnp.array(1e5, dtype=fp))
+        prefactor = (jnp.array(3.0, dtype=fp) * kappa_gamma * mej_g
+                     / (jnp.array(4.0, dtype=fp) * pi * vej_safe ** 2))
+        t_safe    = jnp.maximum(t_i, one)
+        eta_th    = one - jnp.exp(-prefactor / t_safe ** 2)
+
+        # ── 4. New derivatives ────────────────────────────────────────────────
+        beta_safe = jnp.maximum(beta_old, tiny)
+        one_mb    = jnp.maximum(one - beta_old, tiny)
+        drdt      = beta_safe * c / one_mb
+
+        dM_sw_dt   = jnp.array(4.0, dtype=fp) * pi * r ** 2 * n_ism * m_p * drdt
+        dvdt_c     = jnp.array(4.0, dtype=fp) * pi * r ** 2 * beta_safe * c   # comoving dV/dt
+
+        dE_tot_dt  = eta_th * mag_i + dop_old ** 2 * (L_ni - L_emit)
+        dE_com_dt  = (eta_th * dop_old ** (-2) * mag_i
+                      + L_ni - L_emit
+                      - comoving_pressure * dvdt_c)
+        dV_com_dt  = dvdt_c * dop_old
+        dE_int_dt  = dE_com_dt * dop_old
+
+        denom      = (mej_g * c ** 2 + E
+                      + jnp.array(2.0, dtype=fp) * gamma * swept_mass * c ** 2)
+        denom      = jnp.maximum(jnp.abs(denom), jnp.array(1e30, dtype=fp))
+        dgamma_dt  = ((dE_tot_dt
+                       - gamma * dop_old * dE_com_dt
+                       - (gamma ** 2 - one) * c ** 2 * dM_sw_dt)
+                      / denom)
+
+        new_carry  = (gamma, r, V, E, dgamma_dt, drdt, dV_com_dt, dE_int_dt)
+        outputs    = (L_obs, gamma, r, T_comov, dop_old, tau, eta_th)
+        return new_carry, outputs
+
+    return scan_step
+
+
+def _run_magnetar_ode(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    n_grid=2000,
+):
+    """Run the ODE scan and return (log10_lbol, vej_kms) at the requested times.
+
+    Both arrays have the same shape and dtype as *time*.  This function is the
+    shared engine used by the single-output and full-output wrappers below.
+
+    Parameters
+    ----------
+    time : array_like, days (source frame)
+    Returns
+    -------
+    log10_lbol : ndarray  — log10(L_bol) in erg/s
+    vej_kms    : ndarray  — ejecta velocity in km/s (from ODE Lorentz factor)
+    """
+    fp_out = jnp.asarray(time).dtype
+    fp     = jnp.float64
+
+    # Dense log-spaced time grid (source frame, seconds)
+    time_s = jnp.geomspace(
+        jnp.array(1.0, dtype=fp),
+        jnp.array(1.0e8, dtype=fp),
+        n_grid,
+    )
+
+    # Magnetar spin-down luminosity: L = l0 · (1 + t/τ)^((1+n)/(1-n))
+    l0_f     = jnp.asarray(l0,     dtype=fp)
+    tau_f    = jnp.asarray(tau_sd, dtype=fp)
+    nn_f     = jnp.asarray(nn,     dtype=fp)
+    exp_mag  = (jnp.array(1.0, dtype=fp) + nn_f) / (jnp.array(1.0, dtype=fp) - nn_f)
+    mag_lum  = l0_f * (jnp.array(1.0, dtype=fp) + time_s / tau_f) ** exp_mag
+
+    # Initial conditions
+    mej_g  = jnp.asarray(mej,   dtype=fp) * jnp.array(_MSUN, dtype=fp)
+    E_sn_f = jnp.asarray(E_sn,  dtype=fp)
+    c_f    = jnp.array(_C,      dtype=fp)
+    beta0  = jnp.sqrt(E_sn_f / (jnp.array(0.5, dtype=fp) * mej_g)) / c_f
+    beta0  = jnp.minimum(beta0, jnp.array(0.9999, dtype=fp))
+    gamma0 = jnp.array(1.0, dtype=fp) / jnp.sqrt(jnp.array(1.0, dtype=fp) - beta0 ** 2)
+    E0     = jnp.array(0.5, dtype=fp) * beta0 ** 2 * mej_g * c_f ** 2
+    r0     = jnp.array(_R0_CM, dtype=fp)
+    V0     = jnp.array(4.0 / 3.0, dtype=fp) * jnp.array(jnp.pi, dtype=fp) * r0 ** 3
+
+    # Time deltas: dt[0]=0 so first Euler step is a no-op
+    dt = jnp.concatenate([
+        jnp.zeros(1, dtype=fp),
+        jnp.diff(time_s),
+    ])
+
+    # Build scan function (closes over physical parameters)
+    kappa_f   = jnp.asarray(kappa,       dtype=fp)
+    kg_f      = jnp.asarray(kappa_gamma, dtype=fp)
+    fni_f     = jnp.asarray(f_nickel,    dtype=fp)
+    scan_step = _make_scan_step(mej_g, kappa_f, kg_f, fni_f, fp)
+
+    # Run ODE via lax.scan
+    carry0 = (
+        gamma0, r0, V0, E0,
+        jnp.array(0.0, dtype=fp),   # dgamma_dt
+        jnp.array(0.0, dtype=fp),   # drdt
+        jnp.array(0.0, dtype=fp),   # dV_dt
+        jnp.array(0.0, dtype=fp),   # dE_dt
+    )
+    _, (lbol, gamma_grid, _, _, _, _, _) = lax.scan(
+        scan_step, carry0, (time_s, mag_lum, dt)
+    )
+
+    # Interpolate to requested times
+    time_s_req = jnp.asarray(time, dtype=fp) * jnp.array(_DAY, dtype=fp)
+
+    lbol_safe  = jnp.maximum(lbol, jnp.array(1e25, dtype=fp))
+    log10_out  = jnp.interp(time_s_req, time_s, jnp.log10(lbol_safe))
+
+    # vej from Lorentz factor: β = sqrt(1 - 1/γ²), vej = β·c [km/s]
+    beta_grid   = jnp.sqrt(
+        jnp.maximum(
+            jnp.array(1.0, dtype=fp) - jnp.array(1.0, dtype=fp) / gamma_grid ** 2,
+            jnp.array(0.0, dtype=fp),
+        )
+    )
+    vej_kms_grid = beta_grid * c_f / jnp.array(1e5, dtype=fp)
+    vej_kms_out  = jnp.interp(time_s_req, time_s, vej_kms_grid)
+
+    return log10_out.astype(fp_out), vej_kms_out.astype(fp_out)
+
+
+def _magnetar_impl(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    n_grid=2000,
+):
+    """Core ODE — returns log10(L_bol).  No JIT, safe for jax.vmap."""
+    log10_out, _ = _run_magnetar_ode(
+        time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
+    )
+    return log10_out
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2022MNRAS.516.4949S/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2024MNRAS.527.6455O/abstract'
+)
+@partial(jit, static_argnames=['solver', 'n_grid'])
+def general_magnetar_driven_supernova_bolometric(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    solver='diffrax',
+    rtol=1e-5,
+    atol=1e-8,
+    n_grid=2000,
+):
+    """Bolometric light curve of a general magnetar-driven supernova.
+
+    Translated from redback's ``general_magnetar_driven_supernova_bolometric``
+    (Sarin et al. 2022) into JAX, enabling JIT compilation and gradients.
+
+    Parameters
+    ----------
+    time : array_like, days
+        Source-frame times at which to evaluate the model.
+    mej : float, M_sun
+        Ejecta mass.
+    E_sn : float, erg
+        Explosion kinetic energy.
+    kappa : float, cm²/g
+        Optical opacity.
+    l0 : float, erg/s
+        Initial magnetar spin-down luminosity.
+    tau_sd : float, s
+        Magnetar spin-down timescale.
+    nn : float
+        Magnetar braking index (3 = dipole).
+    kappa_gamma : float, cm²/g
+        Gamma-ray opacity for thermalisation efficiency.
+    f_nickel : float, optional
+        Ni-56 mass fraction of ejecta.  Default 0.
+    solver : str, optional
+        ODE backend.  ``'diffrax'`` (default) uses the adaptive Tsit5
+        integrator (~380× faster than redback).  ``'euler'`` uses the
+        fixed-step Euler scan (n_grid points).
+    rtol, atol : float, optional
+        Tolerances for the diffrax solver (ignored when solver='euler').
+    n_grid : int, optional
+        Grid points for the Euler scan (ignored when solver='diffrax').
+        Static — each unique value triggers a separate compilation.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``log10(L_bol)`` in erg/s evaluated at each element of *time*.
+    """
+    if solver == 'diffrax':
+        log10_lbol, _ = _run_magnetar_ode_diffrax(
+            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        )
+    elif solver == 'euler':
+        log10_lbol, _ = _run_magnetar_ode(
+            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
+        )
+    else:
+        raise ValueError(f"solver must be 'diffrax' or 'euler', got {solver!r}")
+    return log10_lbol
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2022MNRAS.516.4949S/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2024MNRAS.527.6455O/abstract'
+)
+@partial(jit, static_argnames=['solver', 'n_grid'])
+def general_magnetar_driven_supernova_bolometric_and_vej(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    solver='diffrax',
+    rtol=1e-5,
+    atol=1e-8,
+    n_grid=2000,
+):
+    """Bolometric light curve + time-varying ejecta velocity.
+
+    Returns the same ODE outputs as
+    ``general_magnetar_driven_supernova_bolometric`` but also exposes the
+    ejecta velocity v_ej(t) = β(t)·c derived from the ODE Lorentz factor.
+    Pass ``vej_kms`` to ``compute_temperature_floor_log10`` for a
+    time-varying photosphere (consistent with the redback reference model).
+
+    Parameters
+    ----------
+    (same as ``general_magnetar_driven_supernova_bolometric``)
+
+    Returns
+    -------
+    log10_lbol : jnp.ndarray  — log10(L_bol) in erg/s, shape (T,)
+    vej_kms    : jnp.ndarray  — ejecta velocity in km/s, shape (T,)
+                 Both arrays have the same dtype as *time*.
+    """
+    if solver == 'diffrax':
+        return _run_magnetar_ode_diffrax(
+            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        )
+    elif solver == 'euler':
+        return _run_magnetar_ode(
+            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
+        )
+    else:
+        raise ValueError(f"solver must be 'diffrax' or 'euler', got {solver!r}")
+
+
+@partial(jit, static_argnames=['n_grid'])
+def general_magnetar_driven_supernova_bolometric_batched(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=None,
+    n_grid=2000,
+):
+    """Evaluate B parameter samples simultaneously via ``jax.vmap``.
+
+    Runs ``general_magnetar_driven_supernova_bolometric`` on B independent
+    parameter vectors in a single JIT-compiled kernel.  On GPU this maps each
+    ODE trajectory to a separate set of CUDA cores; on CPU it benefits from
+    better cache reuse compared to sequential calls.
+
+    Parameters
+    ----------
+    time : array_like, shape (T,)
+        Shared source-frame times in days (broadcast over all B samples).
+    mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma : array_like, shape (B,)
+        Physical parameters — one scalar value per sample.
+    f_nickel : array_like, shape (B,), optional
+        Ni-56 mass fractions.  Defaults to zeros for all samples if None.
+    n_grid : int, optional
+        ODE grid points (static — triggers recompile on change).  Default 2000.
+
+    Returns
+    -------
+    jnp.ndarray, shape (B, T)
+        ``log10(L_bol)`` in erg/s — row i corresponds to sample i.
+    """
+    mej_arr = jnp.asarray(mej, dtype=jnp.float64)
+    f_ni    = (jnp.zeros_like(mej_arr)
+               if f_nickel is None
+               else jnp.asarray(f_nickel, dtype=jnp.float64))
+    return jax.vmap(
+        lambda m, e, k, l, t, n, kg, fn: _magnetar_impl(
+            time, m, e, k, l, t, n, kg, fn, n_grid
+        )
+    )(
+        mej_arr,
+        jnp.asarray(E_sn,        dtype=jnp.float64),
+        jnp.asarray(kappa,       dtype=jnp.float64),
+        jnp.asarray(l0,          dtype=jnp.float64),
+        jnp.asarray(tau_sd,      dtype=jnp.float64),
+        jnp.asarray(nn,          dtype=jnp.float64),
+        jnp.asarray(kappa_gamma, dtype=jnp.float64),
+        f_ni,
+    )
+
+
+def _magnetar_vf_diffrax(t, y, args):
+    """diffrax-compatible vector field for the magnetar-driven ejecta ODE.
+
+    dy/dt = f(t, y, args)  where  y = [gamma, r, V, E].
+
+    Identical physics to ``_make_scan_step`` but expressed in standard ODE
+    form (Doppler factor evaluated at the *current* state rather than the
+    previous-step state — the difference is O(dt) and vanishes for the small
+    steps used by the adaptive solver).
+    """
+    gamma, r, V, E = y[0], y[1], y[2], y[3]
+    mej_g, kappa, kappa_gamma, f_nickel, l0, tau_sd, nn = args
+
+    fp = jnp.float64
+
+    c       = jnp.array(_C,    dtype=fp)
+    m_p     = jnp.array(_MP,   dtype=fp)
+    a_rad   = jnp.array(_ARAD, dtype=fp)
+    n_ism   = jnp.array(_N_ISM, dtype=fp)
+    pi      = jnp.array(jnp.pi, dtype=fp)
+    one     = jnp.array(1.0,   dtype=fp)
+    zero    = jnp.array(0.0,   dtype=fp)
+    tiny    = jnp.array(1e-15, dtype=fp)
+    msun    = jnp.array(_MSUN, dtype=fp)
+
+    ni56_lum  = jnp.array(_NI56_LUM,  dtype=fp)
+    co56_lum  = jnp.array(_CO56_LUM,  dtype=fp)
+    ni56_life = jnp.array(_NI56_LIFE, dtype=fp)
+    co56_life = jnp.array(_CO56_LIFE, dtype=fp)
+
+    nickel_msun = f_nickel * mej_g / msun
+
+    # Safety clamps on state
+    gamma = jnp.maximum(gamma, one + tiny)
+    r     = jnp.maximum(r,     jnp.array(1e8,  dtype=fp))
+    V     = jnp.maximum(V,     jnp.array(1e24, dtype=fp))
+    E     = jnp.maximum(E,     jnp.array(1e30, dtype=fp))
+
+    # Current beta and Doppler factor
+    beta_sq = jnp.maximum(one - one / gamma ** 2, zero)
+    beta    = jnp.sqrt(beta_sq)
+    dop     = one / (gamma * jnp.maximum(one - beta, tiny))
+
+    # Magnetar spin-down luminosity (evaluated analytically at time t)
+    exp_mag = (one + nn) / (one - nn)
+    mag_lum = l0 * (one + t / tau_sd) ** exp_mag
+
+    # Comoving quantities
+    swept_mass        = jnp.array(4.0/3.0, dtype=fp) * pi * r**3 * n_ism * m_p
+    comoving_pressure = E / (jnp.array(3.0, dtype=fp) * V)
+    t_comov           = dop * t
+
+    # Ni/Co decay luminosity (comoving frame)
+    L_ni = nickel_msun * (
+        ni56_lum * jnp.exp(jnp.maximum(-t_comov / ni56_life, jnp.array(-700.0, dtype=fp)))
+        + co56_lum * jnp.exp(jnp.maximum(-t_comov / co56_life, jnp.array(-700.0, dtype=fp)))
+    )
+
+    # Optical depth and emitted luminosity
+    tau        = kappa * (mej_g / V) * (r / gamma)
+    r_ov_g     = r / gamma
+    tau_safe   = jnp.maximum(tau, tiny)
+    L_thin     = E * c / r_ov_g
+    L_thick    = E * c / (tau_safe * r_ov_g)
+    L_emit     = jnp.where(tau <= one, L_thin, L_thick)
+
+    # Thermalisation efficiency
+    vej_new   = beta * c
+    vej_safe  = jnp.maximum(vej_new, jnp.array(1e5, dtype=fp))
+    prefactor = (jnp.array(3.0, dtype=fp) * kappa_gamma * mej_g
+                 / (jnp.array(4.0, dtype=fp) * pi * vej_safe**2))
+    t_safe    = jnp.maximum(t, one)
+    eta_th    = one - jnp.exp(-prefactor / t_safe**2)
+
+    # Derivatives
+    beta_safe = jnp.maximum(beta, tiny)
+    one_mb    = jnp.maximum(one - beta, tiny)
+    drdt      = beta_safe * c / one_mb
+
+    dM_sw_dt  = jnp.array(4.0, dtype=fp) * pi * r**2 * n_ism * m_p * drdt
+    dvdt_c    = jnp.array(4.0, dtype=fp) * pi * r**2 * beta_safe * c
+
+    dE_tot_dt = eta_th * mag_lum + dop**2 * (L_ni - L_emit)
+    dE_com_dt = (eta_th * dop**(-2) * mag_lum
+                 + L_ni - L_emit
+                 - comoving_pressure * dvdt_c)
+    dV_dt     = dvdt_c * dop
+    dE_dt     = dE_com_dt * dop
+
+    denom     = (mej_g * c**2 + E
+                 + jnp.array(2.0, dtype=fp) * gamma * swept_mass * c**2)
+    denom     = jnp.maximum(jnp.abs(denom), jnp.array(1e30, dtype=fp))
+    dgamma_dt = ((dE_tot_dt
+                  - gamma * dop * dE_com_dt
+                  - (gamma**2 - one) * c**2 * dM_sw_dt)
+                 / denom)
+
+    return jnp.array([dgamma_dt, drdt, dV_dt, dE_dt], dtype=fp)
+
+
+def _run_magnetar_ode_diffrax(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    rtol=1e-5,
+    atol=1e-8,
+):
+    """Run the ejecta ODE with diffrax Tsit5 (adaptive step-size).
+
+    Returns ``(log10_lbol, vej_kms)`` at the requested times — identical
+    output contract to ``_run_magnetar_ode`` but uses an adaptive
+    4th/5th-order RK solver instead of fixed-step Euler.
+
+    Parameters
+    ----------
+    time : array_like, source-frame days
+    rtol, atol : float
+        Relative and absolute tolerances for the PID step-size controller.
+    """
+    from diffrax import diffeqsolve, ODETerm, Tsit5, SaveAt, PIDController
+
+    fp     = jnp.float64
+    fp_out = jnp.asarray(time).dtype
+
+    time_s_req = jnp.asarray(time, dtype=fp) * jnp.array(_DAY, dtype=fp)
+
+    # Sort times for diffrax SaveAt (requires ascending order)
+    sort_idx    = jnp.argsort(time_s_req)
+    unsort_idx  = jnp.argsort(sort_idx)
+    time_s_sort = time_s_req[sort_idx]
+
+    # Initial conditions (same as _run_magnetar_ode)
+    mej_g  = jnp.asarray(mej,   dtype=fp) * jnp.array(_MSUN, dtype=fp)
+    E_sn_f = jnp.asarray(E_sn,  dtype=fp)
+    c_f    = jnp.array(_C,      dtype=fp)
+    beta0  = jnp.sqrt(E_sn_f / (jnp.array(0.5, dtype=fp) * mej_g)) / c_f
+    beta0  = jnp.minimum(beta0, jnp.array(0.9999, dtype=fp))
+    gamma0 = jnp.array(1.0, dtype=fp) / jnp.sqrt(jnp.array(1.0, dtype=fp) - beta0**2)
+    E0     = jnp.array(0.5, dtype=fp) * beta0**2 * mej_g * c_f**2
+    r0     = jnp.array(_R0_CM, dtype=fp)
+    V0     = jnp.array(4.0/3.0, dtype=fp) * jnp.array(jnp.pi, dtype=fp) * r0**3
+    y0     = jnp.array([gamma0, r0, V0, E0], dtype=fp)
+
+    args = (
+        mej_g,
+        jnp.asarray(kappa,       dtype=fp),
+        jnp.asarray(kappa_gamma, dtype=fp),
+        jnp.asarray(f_nickel,    dtype=fp),
+        jnp.asarray(l0,          dtype=fp),
+        jnp.asarray(tau_sd,      dtype=fp),
+        jnp.asarray(nn,          dtype=fp),
+    )
+
+    t0 = jnp.array(1.0,  dtype=fp)
+    t1 = jnp.maximum(
+        time_s_sort[-1] * jnp.array(1.001, dtype=fp),
+        jnp.array(2.0, dtype=fp),
+    )
+
+    solution = diffeqsolve(
+        ODETerm(_magnetar_vf_diffrax),
+        Tsit5(),
+        t0=t0,
+        t1=t1,
+        dt0=jnp.array(10.0, dtype=fp),
+        y0=y0,
+        args=args,
+        saveat=SaveAt(ts=time_s_sort),
+        stepsize_controller=PIDController(rtol=rtol, atol=atol),
+        max_steps=262144,
+        throw=False,
+    )
+
+    # Extract saved state (shape: N_save × 4)
+    gamma_out = solution.ys[:, 0]
+    r_out     = solution.ys[:, 1]
+    V_out     = solution.ys[:, 2]
+    E_out     = solution.ys[:, 3]
+
+    # Derive L_obs and v_ej from saved state
+    beta_out  = jnp.sqrt(
+        jnp.maximum(jnp.array(1.0, dtype=fp) - jnp.array(1.0, dtype=fp) / gamma_out**2,
+                    jnp.array(0.0, dtype=fp))
+    )
+    dop_out   = jnp.array(1.0, dtype=fp) / (
+        gamma_out * jnp.maximum(jnp.array(1.0, dtype=fp) - beta_out, jnp.array(1e-15, dtype=fp))
+    )
+    tau_out   = (jnp.asarray(kappa, dtype=fp)
+                 * (mej_g / V_out)
+                 * (r_out / gamma_out))
+    r_ov_g    = r_out / gamma_out
+    tau_safe  = jnp.maximum(tau_out, jnp.array(1e-15, dtype=fp))
+    L_thin    = E_out * c_f / r_ov_g
+    L_thick   = E_out * c_f / (tau_safe * r_ov_g)
+    L_emit    = jnp.where(tau_out <= jnp.array(1.0, dtype=fp), L_thin, L_thick)
+    L_obs     = L_emit * dop_out**2
+
+    lbol_safe     = jnp.maximum(L_obs, jnp.array(1e25, dtype=fp))
+    log10_lbol    = jnp.log10(lbol_safe)
+    vej_kms_out   = beta_out * c_f / jnp.array(1e5, dtype=fp)
+
+    # Unsort to restore original time ordering
+    log10_lbol  = log10_lbol[unsort_idx]
+    vej_kms_out = vej_kms_out[unsort_idx]
+
+    return log10_lbol.astype(fp_out), vej_kms_out.astype(fp_out)
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2022MNRAS.516.4949S/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2024MNRAS.527.6455O/abstract'
+)
+@jit
+def general_magnetar_driven_supernova_bolometric_diffrax(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    rtol=1e-5,
+    atol=1e-8,
+):
+    """Bolometric light curve using the diffrax Tsit5 adaptive ODE solver.
+
+    Functionally equivalent to ``general_magnetar_driven_supernova_bolometric``
+    (with ``solver='diffrax'``) but exposed as a standalone function for
+    backward compatibility.  Typically 3–10× faster than the Euler scan at
+    the same accuracy once compiled.
+
+    Parameters
+    ----------
+    time : array_like, source-frame days
+    (other params same as general_magnetar_driven_supernova_bolometric)
+    rtol : float, default 1e-5
+    atol : float, default 1e-8
+
+    Returns
+    -------
+    log10_lbol : jnp.ndarray  — log10(L_bol) in erg/s
+    """
+    log10_lbol, _ = _run_magnetar_ode_diffrax(
+        time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+    )
+    return log10_lbol
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2022MNRAS.516.4949S/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2024MNRAS.527.6455O/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...850...55N/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...851L..21V/abstract'
+)
+@partial(jit, static_argnames=['solver', 'n_grid'])
+def general_magnetar_driven_supernova(
+    time,
+    frequency,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    temperature_floor,
+    luminosity_distance,
+    redshift,
+    cutoff_wavelength=3000.0,
+    f_nickel=0.0,
+    solver='diffrax',
+    rtol=1e-5,
+    atol=1e-8,
+    n_grid=2000,
+    alpha_uv=1.0,
+):
+    """Full multiband general magnetar-driven supernova model.
+
+    1:1 JAX translation of redback's ``general_magnetar_driven_supernova``
+    with ``output_format='flux_density'``, using the ``TemperatureFloor``
+    photosphere and ``CutoffBlackbody`` SED.
+
+    Pipeline
+    --------
+    1. K-correction:  freq_src = freq_obs·(1+z),  t_src = t_obs/(1+z)
+    2. ODE:           (log10_lbol, vej_kms) from chosen backend
+    3. Photosphere:   (T_ph, log10_r_ph) from TemperatureFloor
+    4. SED:           F_mjy from CutoffBlackbody
+    5. Return:        F_mjy · (1+z)
+
+    Parameters
+    ----------
+    time : (N,) observer-frame days
+    frequency : (N,) observer-frame Hz
+    mej : float, M_sun
+    E_sn : float, erg
+    kappa : float, cm²/g
+    l0 : float, erg/s
+    tau_sd : float, s
+    nn : float
+    kappa_gamma : float, cm²/g
+    temperature_floor : float, K
+    luminosity_distance : float, cm
+    redshift : float
+    cutoff_wavelength : float, Å  (default 3000)
+    f_nickel : float  (default 0)
+    solver : str, optional
+        ``'diffrax'`` (default, adaptive Tsit5) or ``'euler'`` (fixed-step).
+    rtol, atol : float, optional
+        diffrax tolerances (ignored when solver='euler').
+    n_grid : int, optional
+        Euler grid points (ignored when solver='diffrax').
+    alpha_uv : float, default 1.0
+        UV power-law suppression index for CutoffBlackbody SED.
+        λ < λ_c contributes Planck × (λ/λ_c)^alpha_uv.  Valid range [0, 4).
+
+    Returns
+    -------
+    F_mjy : (N,) mJy  — observer-frame flux density
+    """
+    fp = jnp.float64
+
+    # 1. K-correction
+    freq  = jnp.asarray(frequency, dtype=fp)
+    t_obs = jnp.asarray(time,      dtype=fp)
+    z     = jnp.asarray(redshift,  dtype=fp)
+
+    freq_src = freq  * (jnp.array(1.0, dtype=fp) + z)
+    time_src = t_obs / (jnp.array(1.0, dtype=fp) + z)
+
+    # 2. ODE
+    if solver == 'diffrax':
+        log10_lbol, vej_kms = _run_magnetar_ode_diffrax(
+            time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        )
+    elif solver == 'euler':
+        log10_lbol, vej_kms = _run_magnetar_ode(
+            time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
+        )
+    else:
+        raise ValueError(f"solver must be 'diffrax' or 'euler', got {solver!r}")
+
+    # 3. TemperatureFloor photosphere
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_src, log10_lbol, vej_kms, temperature_floor
+    )
+    r_ph  = jnp.power(jnp.array(10.0, dtype=fp), log10_r_ph)
+    lbol  = jnp.power(jnp.array(10.0, dtype=fp), log10_lbol)
+
+    # 4. CutoffBlackbody SED
+    F_mjy = cutoff_blackbody_flux_density(
+        freq_src, lbol, T_ph, r_ph,
+        jnp.asarray(luminosity_distance, dtype=fp),
+        cutoff_wavelength,
+        alpha_uv,
+    )
+
+    # 5. Observer-frame correction
+    return F_mjy * (jnp.array(1.0, dtype=fp) + z)
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2022MNRAS.516.4949S/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2024MNRAS.527.6455O/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...850...55N/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...851L..21V/abstract'
+)
+@jit
+def general_magnetar_driven_supernova_diffrax(
+    time,
+    frequency,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    temperature_floor,
+    luminosity_distance,
+    redshift,
+    cutoff_wavelength=3000.0,
+    f_nickel=0.0,
+    rtol=1e-5,
+    atol=1e-8,
+    alpha_uv=1.0,
+):
+    """Full multiband model using the diffrax Tsit5 adaptive ODE solver.
+
+    Standalone backward-compatible variant of ``general_magnetar_driven_supernova``
+    that always uses the diffrax backend.  Equivalent to calling
+    ``general_magnetar_driven_supernova(..., solver='diffrax')``.
+
+    Parameters
+    ----------
+    (all params same as general_magnetar_driven_supernova except n_grid)
+    rtol : float, default 1e-5
+    atol : float, default 1e-8
+    alpha_uv : float, default 1.0
+
+    Returns
+    -------
+    F_mjy : (N,) mJy
+    """
+    fp = jnp.float64
+
+    freq  = jnp.asarray(frequency, dtype=fp)
+    t_obs = jnp.asarray(time,      dtype=fp)
+    z     = jnp.asarray(redshift,  dtype=fp)
+
+    freq_src = freq  * (jnp.array(1.0, dtype=fp) + z)
+    time_src = t_obs / (jnp.array(1.0, dtype=fp) + z)
+
+    log10_lbol, vej_kms = _run_magnetar_ode_diffrax(
+        time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+    )
+
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_src, log10_lbol, vej_kms, temperature_floor
+    )
+    r_ph = jnp.power(jnp.array(10.0, dtype=fp), log10_r_ph)
+    lbol = jnp.power(jnp.array(10.0, dtype=fp), log10_lbol)
+
+    F_mjy = cutoff_blackbody_flux_density(
+        freq_src, lbol, T_ph, r_ph,
+        jnp.asarray(luminosity_distance, dtype=fp),
+        cutoff_wavelength,
+        alpha_uv,
+    )
+
+    return F_mjy * (jnp.array(1.0, dtype=fp) + z)
+
+
+@jit
+def general_magnetar_driven_supernova_bolometric_and_vej_diffrax(
+    time,
+    mej,
+    E_sn,
+    kappa,
+    l0,
+    tau_sd,
+    nn,
+    kappa_gamma,
+    f_nickel=0.0,
+    rtol=1e-5,
+    atol=1e-8,
+):
+    """Return (log10_lbol, vej_kms) from the diffrax Tsit5 adaptive ODE.
+
+    Counterpart to ``general_magnetar_driven_supernova_bolometric_and_vej``
+    using the diffrax backend.  Required internally by
+    ``general_magnetar_supernova_spectra_diffrax`` (the spectra factory needs
+    vej derived from the ODE, not as a free parameter).
+
+    Parameters
+    ----------
+    time : array_like, source-frame days
+    (other params same as general_magnetar_driven_supernova_bolometric_diffrax)
+
+    Returns
+    -------
+    log10_lbol : jnp.ndarray  — log10(L_bol) in erg/s
+    vej_kms : jnp.ndarray  — ejecta velocity in km/s
+    """
+    return _run_magnetar_ode_diffrax(
+        time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+    )
