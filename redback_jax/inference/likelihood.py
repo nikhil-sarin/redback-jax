@@ -224,10 +224,12 @@ class Likelihood:
             param_dict = {n: params[i] for i, n in enumerate(names)}
 
             if t0_key is not None and t0_key in param_dict:
-                t0       = param_dict.pop(t0_key)
-                t_source = (obs_times - t0) / (1.0 + redshift)
+                t0             = param_dict.pop(t0_key)
+                t_source       = (obs_times - t0) / (1.0 + redshift)  # source-frame
+                t_obs_since_t0 = obs_times - t0                        # observer-frame
             else:
-                t_source = obs_times
+                t_source       = obs_times
+                t_obs_since_t0 = obs_times
 
             model_kwargs = {**fixed_params, **param_dict}
             if evaluation_mode == 'direct_photometry':
@@ -246,10 +248,10 @@ class Likelihood:
                 else:
                     out = model_fn(**model_kwargs)
 
-                # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
-                # band, so -2.5*log10 gives the correct AB magnitude directly.
+                # out.time is observer-frame days since explosion; query with the
+                # same convention so timeseries_multiband_flux interpolates correctly.
                 norm_fluxes = timeseries_multiband_flux(
-                    t_source, bridges, obs_band_idx,
+                    t_obs_since_t0, bridges, obs_band_idx,
                     out.time, out.lambdas, out.spectra,
                     1.0, _zero_before, _minphase,
                     time_degree=1, zps=_zps, zpsys='ab',
@@ -329,12 +331,10 @@ class FluxDensityLikelihood:
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
             param_dict = {n: params[i] for i, n in enumerate(names)}
             F_pred = model(t, nu, **fixed, **param_dict)
-            # Replace non-finite flux with 0 before computing chi2 so that
-            # gradients stay finite through the jnp.where (both branches are
-            # always evaluated in JAX; NaN in the unused branch still propagates
-            # gradients).
+            # nan_to_num ensures NaN values cannot poison gradients via XLA's
+            # bitselect lowering of jnp.where, even when is_finite=False selects zeros.
             is_finite = jnp.all(jnp.isfinite(F_pred))
-            F_pred_safe = jnp.where(is_finite, F_pred, jnp.zeros_like(F_pred))
+            F_pred_safe = jnp.where(is_finite, jnp.nan_to_num(F_pred), jnp.zeros_like(F_pred))
             chi2 = jnp.sum(((F_pred_safe - F_obs) / F_err) ** 2)
             return jnp.where(is_finite, -0.5 * chi2, -1e30)
 

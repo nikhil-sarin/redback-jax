@@ -214,9 +214,9 @@ class NestedSampler:
             pbar = None
 
         # Iterate until the remaining evidence contribution is negligible.
-        # Use do-while semantics: always run at least one step before checking
-        # the termination criterion. The initial state has logZ=-inf so the
-        # difference is nan and the criterion would fire spuriously otherwise.
+        # Written as `not (diff > threshold)` so that -inf and nan differences
+        # (which arise when logZ_live or logZ is -inf) correctly trigger termination
+        # rather than hanging the loop.
         while True:
             key, subkey = jax.random.split(key)
             state, dead_info = step(subkey, state)
@@ -225,7 +225,7 @@ class NestedSampler:
                 pbar.update(self.n_delete)
             logZ_live = float(state.sampler_state.logZ_live)
             logZ      = float(state.sampler_state.logZ)
-            if np.isfinite(logZ_live) and np.isfinite(logZ) and (logZ_live - logZ) <= self.term_dlogz:
+            if not (logZ_live - logZ > self.term_dlogz):
                 break
 
         if pbar is not None:
