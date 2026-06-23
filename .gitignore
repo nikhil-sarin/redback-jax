@@ -217,3 +217,7 @@ __marimo__/
 
 # Example outputs (generated)
 examples/results/
+examples/general_magnetar_fitting.ipynb
+
+# Notebooks (local development only, not tracked)
+notebooks/

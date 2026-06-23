@@ -33,6 +33,7 @@ Redback-JAX reimplements redback's analytical transient models in JAX, using log
 | `shocked_cocoon_bolometric` | Shocked jet cocoon | Piro & Kollmeier 2018 |
 | `metzger_kilonova_bolometric` | r-process ODE, 200 shells | Metzger 2017 |
 | `magnetar_boosted_kilonova_bolometric` | r-process ODE + magnetar injection | Yu+ 2013 |
+| `general_magnetar_driven_supernova_bolometric` | Relativistic spin-down ODE (float64) | Sarin+ 2022, Omand & Sarin 2024 |
 
 All bolometric functions return **`log10_lbol`** (log base-10 of luminosity in erg/s). 
 This is the natural unit for GPU inference — float32 can represent log10 values for any physically realistic luminosity.

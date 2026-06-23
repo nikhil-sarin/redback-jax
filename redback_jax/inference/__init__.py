@@ -24,7 +24,7 @@ from .prior import (
     Prior,
 )
 
-from .likelihood import Likelihood
+from .likelihood import Likelihood, FluxDensityLikelihood
 
 from .nested_sampler import (
     NestedSampler,
@@ -58,6 +58,7 @@ __all__ = [
     'Gaussian',
     'Prior',
     'Likelihood',
+    'FluxDensityLikelihood',
     'NestedSampler',
     'NSResult',
     'MCMCSampler',
