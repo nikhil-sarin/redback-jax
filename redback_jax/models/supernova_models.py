@@ -1363,7 +1363,7 @@ def general_magnetar_driven_supernova(
 
     # 4. CutoffBlackbody SED
     F_mjy = cutoff_blackbody_flux_density(
-        T_ph, r_ph, lbol, freq_src,
+        freq_src, lbol, T_ph, r_ph,
         jnp.asarray(luminosity_distance, dtype=fp),
         cutoff_wavelength,
         alpha_uv,
@@ -1436,7 +1436,7 @@ def general_magnetar_driven_supernova_diffrax(
     lbol = jnp.power(jnp.array(10.0, dtype=fp), log10_lbol)
 
     F_mjy = cutoff_blackbody_flux_density(
-        T_ph, r_ph, lbol, freq_src,
+        freq_src, lbol, T_ph, r_ph,
         jnp.asarray(luminosity_distance, dtype=fp),
         cutoff_wavelength,
         alpha_uv,
@@ -1545,7 +1545,7 @@ def csm_nickel_spectra(
     # Dense grids — source frame
     # lambda_obs: extended to 25000 Å to cover NIR bands (2MASS J/H/Ks, etc.)
     lambda_obs  = jnp.geomspace(jnp.array(500.0,  dtype=fp),
-                                 jnp.array(25000.0, dtype=fp), 100)
+                                 jnp.array(25000.0, dtype=fp), 50)
     time_source = jnp.geomspace(jnp.array(0.1,    dtype=fp),
                                  jnp.array(2000.0,  dtype=fp), 200)
     dense_times = jnp.linspace( jnp.array(0.1,    dtype=fp),
@@ -1614,10 +1614,11 @@ def csm_nickel_spectra(
 
     def _spec_one_time(T_i, r_i, L_i):
         return _cbd_fd(
+            freq_src,
+            jnp.broadcast_to(L_i, (N_lam,)),
             jnp.broadcast_to(T_i, (N_lam,)),
             jnp.broadcast_to(r_i, (N_lam,)),
-            jnp.broadcast_to(L_i, (N_lam,)),
-            freq_src, dl_f, cw_f, ai_f,
+            dl_f, cw_f, ai_f,
         )  # (N_lam,) mJy
 
     spectra_mjy = jax.vmap(_spec_one_time)(T_ph, r_ph, lbol)   # (N_time, N_lam) mJy
@@ -1744,10 +1745,11 @@ def _csm_nickel_direct_photometry(
 
         # CutoffBlackbody SED at each band wavelength (mJy)
         f_mjy = _cbd_fd(
+            freq_s,
+            jnp.broadcast_to(L_i, (max_wlen,)),
             jnp.broadcast_to(T_i, (max_wlen,)),
             jnp.broadcast_to(r_i, (max_wlen,)),
-            jnp.broadcast_to(L_i, (max_wlen,)),
-            freq_s, dl_f, cw_f, ai_f,
+            dl_f, cw_f, ai_f,
         )
 
         # mJy → observer-frame erg/s/cm²/Å (same conversion as spectra version)

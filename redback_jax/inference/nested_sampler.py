@@ -48,7 +48,7 @@ import numpy as np
 
 try:
     import blackjax
-    from blackjax.ns.adaptive import nss as _nss
+    from blackjax.ns.nss import as_top_level_api as _nss
     from blackjax.ns.utils import log_weights as _bj_log_weights
     from blackjax.ns.utils import finalise as _bj_finalise
     HAS_BLACKJAX = True
@@ -175,8 +175,8 @@ class NestedSampler:
         self._algo = _nss(
             logprior_fn=self._log_prior_fn,
             loglikelihood_fn=self._log_like_fn,
-            num_mcmc_steps=self.n_mcmc_steps,
-            n_delete=self.n_delete,
+            num_inner_steps=self.n_mcmc_steps,
+            num_delete=self.n_delete,
             max_shrinkage=max_shrinkage,
             max_steps=max_steps,
         )
@@ -227,8 +227,8 @@ class NestedSampler:
             dead.append(dead_info)
             if pbar is not None:
                 pbar.update(self.n_delete)
-            logZ_live = float(state.sampler_state.logZ_live)
-            logZ      = float(state.sampler_state.logZ)
+            logZ_live = float(state.integrator.logZ_live)
+            logZ      = float(state.integrator.logZ)
             if not (logZ_live - logZ > self.term_dlogz):
                 break
 
@@ -236,9 +236,10 @@ class NestedSampler:
             pbar.close()
 
         if self.verbose:
-            print(f"\nlogZ = {float(state.sampler_state.logZ):.2f}")
+            print(f"\nlogZ = {float(state.integrator.logZ):.2f}")
 
         # Combine the per-iteration dead points with the final live points.
+        # finalise() expects AdaptiveNSState (state), not the inner state.particles.
         dead_all = _bj_finalise(state, dead)
 
         # log_weights returns shape (n_points, n_mc): Monte-Carlo draws over
@@ -253,9 +254,9 @@ class NestedSampler:
         if self.verbose:
             print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
 
-        # Per-parameter posterior samples.  Positions are dead_all.particles
-        # — shape (n_points, n_params).
-        positions = dead_all.particles
+        # Per-parameter posterior samples.
+        # dead_all is NSInfo; positions live at dead_all.particles.position.
+        positions = dead_all.particles.position   # (n_points, n_params)
         samples = {
             name: positions[:, i]
             for i, name in enumerate(self.prior.names)
@@ -267,8 +268,8 @@ class NestedSampler:
             chains_dir = os.path.join(self.outdir, 'chains')
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                logL       = np.asarray(dead_all.logL)
-                logL_birth = np.asarray(dead_all.logL_birth)
+                logL       = np.asarray(dead_all.particles.loglikelihood)
+                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
                 table = np.column_stack([np.asarray(positions), logL, logL_birth])
                 np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
                 with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
