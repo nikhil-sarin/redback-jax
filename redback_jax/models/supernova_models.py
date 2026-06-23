@@ -91,6 +91,13 @@ _csm_Bf_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Bf_grid,
 _csm_Br_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Br_grid,
                        bounds_error=False, fill_value=None)
 
+# JAX-interpolable CSM coefficients for nn=12 (fixed) — makes eta differentiable
+_csm_nn12_idx = int(_np.argmin(_np.abs(_csm_nn_unique - 12.0)))
+_csm_eta_jax  = jnp.array(_csm_eta_unique,                   dtype=jnp.float64)
+_csm_AA_nn12  = jnp.array(_csm_AA_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+_csm_Bf_nn12  = jnp.array(_csm_Bf_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+_csm_Br_nn12  = jnp.array(_csm_Br_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+
 
 
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
