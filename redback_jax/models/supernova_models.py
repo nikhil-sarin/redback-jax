@@ -1764,3 +1764,120 @@ def _csm_nickel_direct_photometry(
 
 
 csm_nickel_spectra._redback_jax_direct_photometry = _csm_nickel_direct_photometry
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2012ApJ...746..121C/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...850...55N/abstract'
+)
+@jit
+def csm_nickel_flux_density(
+    time,
+    frequency,
+    redshift,
+    lum_dist,
+    mej,
+    f_nickel,
+    csm_mass,
+    vej,
+    eta,
+    rho,
+    kappa,
+    kappa_gamma,
+    r0,
+    cutoff_wavelength,
+    absorption_index,
+    temperature_floor,
+):
+    """CSM+nickel flux density model for use with ``FluxDensityLikelihood``.
+
+    Same physics as ``csm_nickel_spectra`` but evaluates the SED directly at
+    each observation's (time, frequency) pair instead of building a full
+    ``(n_time, n_lam)`` spectral cube.  This avoids the ``timeseries_multiband_flux``
+    bandpass integration and is typically 5–10× faster per likelihood evaluation.
+
+    Parameters
+    ----------
+    time : (N,) observer-frame days since explosion
+    frequency : (N,) Hz, observer-frame
+    redshift : float
+    lum_dist : float, cm
+    mej, f_nickel, csm_mass, vej, eta, rho, kappa, kappa_gamma, r0 : floats
+        Same physical parameters as ``csm_nickel_spectra``.
+    cutoff_wavelength : float, Å
+    absorption_index : float
+    temperature_floor : float, K
+
+    Returns
+    -------
+    F_mjy : (N,) mJy  observer-frame flux density
+    """
+    from redback_jax.sed import cutoff_blackbody_flux_density as _cbd_fd
+
+    fp = jnp.float64
+    t_obs  = jnp.asarray(time,      dtype=fp)
+    nu_obs = jnp.asarray(frequency, dtype=fp)
+    z_f    = jnp.asarray(redshift,  dtype=fp)
+
+    one_pz = jnp.array(1.0, fp) + z_f
+    t_src  = t_obs  / one_pz       # source-frame time since explosion
+    nu_src = nu_obs * one_pz       # source-frame frequency
+
+    # Dense source-frame grid for bolometric luminosity
+    dense_times       = jnp.linspace(jnp.array(0.1, fp), jnp.array(2100.0, fp), 1000)
+    time_source_grid  = jnp.geomspace(jnp.array(0.1,  fp), jnp.array(2000.0, fp), 200)
+
+    # CSM shock coefficients at requested eta
+    eta_f = jnp.asarray(eta, dtype=fp)
+    AA    = jnp.interp(eta_f, _csm_eta_jax, _csm_AA_nn12)
+    Bf    = jnp.interp(eta_f, _csm_eta_jax, _csm_Bf_nn12)
+    Br    = jnp.interp(eta_f, _csm_eta_jax, _csm_Br_nn12)
+
+    dense_lbol_csm, r_photosphere, mass_csm_threshold = _csm_engine(
+        dense_times,
+        jnp.asarray(mej,      fp), jnp.asarray(csm_mass, fp),
+        jnp.asarray(vej,      fp), eta_f,
+        jnp.asarray(rho,      fp), jnp.asarray(kappa, fp),
+        jnp.asarray(r0,       fp),
+        12.0, AA, Bf, Br, 1.0, 1.0,
+    )
+
+    mej_eff      = jnp.asarray(mej, fp) + mass_csm_threshold / jnp.array(_SOLAR_MASS, fp)
+    log10_nickel = _diffused_nickelcobalt_log10_luminosity(
+        dense_times, f_nickel, mej_eff,
+        vej=jnp.asarray(vej,         fp),
+        kappa=jnp.asarray(kappa,     fp),
+        kappa_gamma=jnp.asarray(kappa_gamma, fp),
+    )
+    dense_lbol_total = (jnp.power(jnp.array(10.0, fp), log10_nickel)
+                        + dense_lbol_csm)
+    log10_dense = jnp.log10(jnp.maximum(dense_lbol_total, jnp.array(1e30, fp)))
+
+    log10_lbol = csm_diffusion_convert_luminosity(
+        time=time_source_grid,
+        dense_times=dense_times,
+        log10_luminosity=log10_dense,
+        kappa=jnp.asarray(kappa, fp),
+        r_photosphere=r_photosphere,
+        mass_csm_threshold=mass_csm_threshold,
+    )
+
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_source_grid, log10_lbol,
+        jnp.asarray(vej,              fp),
+        jnp.asarray(temperature_floor, fp),
+    )
+    r_ph = jnp.power(jnp.array(10.0, fp), log10_r_ph)
+    lbol = jnp.power(jnp.array(10.0, fp), log10_lbol)
+
+    # Interpolate to observation times (source frame)
+    T_at_obs  = jnp.interp(t_src, time_source_grid, T_ph,  left=jnp.array(0.0, fp))
+    r_at_obs  = jnp.interp(t_src, time_source_grid, r_ph,  left=jnp.array(0.0, fp))
+    L_at_obs  = jnp.interp(t_src, time_source_grid, lbol,  left=jnp.array(0.0, fp))
+
+    dl_f  = jnp.asarray(lum_dist,         fp)
+    cw_f  = jnp.asarray(cutoff_wavelength, fp)
+    ai_f  = jnp.asarray(absorption_index,  fp)
+
+    F_mjy = _cbd_fd(nu_src, L_at_obs, T_at_obs, r_at_obs, dl_f, cw_f, ai_f)
+    return F_mjy * one_pz

@@ -11,6 +11,7 @@ from .supernova_models import (
     magnetar_nickel_bolometric,
     csm_interaction_bolometric,
     csm_nickel_spectra,
+    csm_nickel_flux_density,
 )
 
 # Shock-powered models
@@ -68,6 +69,7 @@ register_model("magnetar_powered_bolometric", magnetar_powered_bolometric)
 register_model("magnetar_nickel_bolometric", magnetar_nickel_bolometric)
 register_model("csm_interaction_bolometric", csm_interaction_bolometric)
 register_model("csm_nickel_spectra", csm_nickel_spectra)
+register_model("csm_nickel_flux_density", csm_nickel_flux_density)
 register_model("shock_cooling_bolometric", shock_cooling_bolometric)
 register_model("shocked_cocoon_bolometric", shocked_cocoon_bolometric)
 register_model("shock_cooling_and_arnett_bolometric", shock_cooling_and_arnett_bolometric)
@@ -140,6 +142,7 @@ __all__ = [
     'magnetar_nickel_bolometric',
     'csm_interaction_bolometric',
     'csm_nickel_spectra',
+    'csm_nickel_flux_density',
     # Shock-powered models
     'shock_cooling_bolometric',
     'shocked_cocoon_bolometric',
