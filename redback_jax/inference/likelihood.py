@@ -86,6 +86,7 @@ class Likelihood:
         evaluation_mode: str = 'full',
         compact_time_grid_size: int = 256,
         compact_grid_pad_days: float = 5.0,
+        param_transforms: Optional[Dict] = None,
     ):
         if not _HAS_JAX_SUPERNOVAE:
             raise ImportError(
@@ -105,6 +106,9 @@ class Likelihood:
         self.fixed_params = dict(fixed_params)
         self.t0_key       = t0_key
         self.evaluation_mode = evaluation_mode
+        # param_transforms: {sampled_name: (model_name, callable)}
+        # e.g. {'log_rho': ('rho', jnp.exp)} samples log_rho but passes rho=exp(log_rho) to the model
+        self.param_transforms = dict(param_transforms) if param_transforms else {}
         self.compact_time_grid_size = int(compact_time_grid_size)
         self.compact_grid_pad_days = float(compact_grid_pad_days)
 
@@ -138,7 +142,12 @@ class Likelihood:
         dummy_kwargs = dict(self.fixed_params)
         for d in prior.distributions:
             if d.name != self.t0_key:
-                dummy_kwargs.setdefault(d.name, 0.5 * (d.low + d.high))
+                val = 0.5 * (d.low + d.high)
+                if d.name in self.param_transforms:
+                    model_name, fn = self.param_transforms[d.name]
+                    dummy_kwargs.setdefault(model_name, float(fn(jnp.array(val))))
+                else:
+                    dummy_kwargs.setdefault(d.name, val)
 
         self._bridges   = tuple(
             precompute_bandflux_bridge(get_bandpass(b)) for b in self._unique_bands
@@ -209,6 +218,7 @@ class Likelihood:
         t0_key        = self.t0_key
         names         = prior.names
         evaluation_mode = self.evaluation_mode
+        _transforms   = {k: (mn, fn) for k, (mn, fn) in self.param_transforms.items()}
         compact_time_grid = self._compact_time_observer_grid
         direct_photometry_fn = getattr(self._model_fn, '_redback_jax_direct_photometry', None)
 
@@ -221,15 +231,21 @@ class Likelihood:
 
         @jax.jit
         def _log_like(params: jnp.ndarray) -> jnp.ndarray:
-            param_dict = {n: params[i] for i, n in enumerate(names)}
+            param_dict = {}
+            for i, n in enumerate(names):
+                if n in _transforms:
+                    model_name, fn = _transforms[n]
+                    param_dict[model_name] = fn(params[i])
+                else:
+                    param_dict[n] = params[i]
 
             if t0_key is not None and t0_key in param_dict:
-                t0             = param_dict.pop(t0_key)
-                t_source       = (obs_times - t0) / (1.0 + redshift)  # source-frame
-                t_obs_since_t0 = obs_times - t0                        # observer-frame
+                t0              = param_dict.pop(t0_key)
+                t_obs_since_t0  = obs_times - t0
+                t_source        = t_obs_since_t0 / (1.0 + redshift)
             else:
-                t_source       = obs_times
-                t_obs_since_t0 = obs_times
+                t_obs_since_t0  = obs_times
+                t_source        = obs_times
 
             model_kwargs = {**fixed_params, **param_dict}
             if evaluation_mode == 'direct_photometry':
@@ -248,8 +264,9 @@ class Likelihood:
                 else:
                     out = model_fn(**model_kwargs)
 
-                # out.time is observer-frame days since explosion; query with the
-                # same convention so timeseries_multiband_flux interpolates correctly.
+                # timeseries_multiband_flux with zps=0 returns flux/zpbandflux per
+                # band, so -2.5*log10 gives the correct AB magnitude directly.
+                # Models return observer-frame time since explosion; query at t_obs_since_t0.
                 norm_fluxes = timeseries_multiband_flux(
                     t_obs_since_t0, bridges, obs_band_idx,
                     out.time, out.lambdas, out.spectra,

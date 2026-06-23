@@ -148,6 +148,8 @@ class NestedSampler:
         n_delete: int = 20,
         num_mcmc_steps_multiplier: int = 5,
         termination_dlogz: float = -3.0,
+        max_shrinkage: int = 25,
+        max_steps: int = 10,
         verbose: bool = True,
     ):
         if not HAS_BLACKJAX:
@@ -175,6 +177,8 @@ class NestedSampler:
             loglikelihood_fn=self._log_like_fn,
             num_mcmc_steps=self.n_mcmc_steps,
             n_delete=self.n_delete,
+            max_shrinkage=max_shrinkage,
+            max_steps=max_steps,
         )
 
     # ------------------------------------------------------------------

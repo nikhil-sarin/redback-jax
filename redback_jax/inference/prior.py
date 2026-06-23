@@ -26,7 +26,7 @@ import math as _math
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import List, Sequence
+from typing import List, Sequence, Union
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +200,155 @@ class Gaussian(_Distribution):
 
 
 # ---------------------------------------------------------------------------
+# Constraint (physics-based differentiable barrier)
+# ---------------------------------------------------------------------------
+
+class Constraint:
+    """Differentiable physics constraint added to the log-prior.
+
+    ``fn(param_dict)`` must return a *slack* scalar: positive means the
+    constraint is satisfied, negative means it is violated.  The
+    log-contribution is ``-softplus(-20 * slack / scale)``, which is ≈ 0
+    when slack >> 0 and steeply negative when violated, with gradients
+    finite everywhere so NUTS works.
+
+    Parameters
+    ----------
+    fn : callable
+        ``fn(param_dict: dict) -> slack_scalar``.  Fixed parameters should
+        be captured in the closure.
+    scale : float
+        Normalises the slack before applying the barrier.  Set to a typical
+        value of the slack so the transition width is ~5% of that scale.
+    name : str
+        Human-readable label used in repr.
+    """
+
+    def __init__(self, fn, scale: float = 1.0, name: str = 'constraint'):
+        self.fn    = fn
+        self.scale = float(scale)
+        self.name  = name
+
+    def log_prob(self, param_dict: dict) -> jnp.ndarray:
+        slack = self.fn(param_dict)
+        return -jax.nn.softplus(-20.0 * slack / self.scale)
+
+    def __repr__(self) -> str:
+        return f"Constraint(name={self.name!r}, scale={self.scale})"
+
+
+# ---------------------------------------------------------------------------
+# Factory: CSM photosphere validity
+# ---------------------------------------------------------------------------
+
+def make_csm_photosphere_constraint_log(fixed_kappa: float = 0.1,
+                                        scale: float = 0.1) -> Constraint:
+    """Like make_csm_photosphere_constraint but expects log_rho and log_r0 in param_dict.
+
+    Use this when rho and r0 are sampled in log-space (Uniform priors on their
+    logarithms) so that gradients through the constraint are smooth.
+    """
+    _AU    = 1.496e13
+    _MSUN  = 1.989e33
+    _kappa = float(fixed_kappa)
+
+    def _csm_slack(params: dict) -> jnp.ndarray:
+        r0       = jnp.exp(params['log_r0'])
+        csm_mass = params['csm_mass']
+        rho      = jnp.exp(params['log_rho'])
+        eta      = params['eta']
+
+        r0_cm      = r0 * _AU
+        csm_mass_g = csm_mass * _MSUN
+        qq         = rho * r0_cm ** eta
+
+        eta_safe = jnp.where(jnp.abs(eta - 1.0) < 0.05,
+                             jnp.asarray(0.95, dtype=eta.dtype), eta)
+
+        radius_csm = jnp.maximum(
+            ((3.0 - eta) / (4.0 * jnp.pi * jnp.maximum(qq, 1e-300))
+             * csm_mass_g
+             + r0_cm ** (3.0 - eta)) ** (1.0 / (3.0 - eta)),
+            r0_cm,
+        )
+
+        r_phot = jnp.abs(
+            (-2.0 * (1.0 - eta_safe)
+             / (3.0 * _kappa * jnp.maximum(qq, 1e-300))
+             + radius_csm ** (1.0 - eta_safe)
+             ) ** (1.0 / (1.0 - eta_safe))
+        )
+
+        mass_thresh = jnp.abs(
+            4.0 * jnp.pi * jnp.maximum(qq, 1e-300) / (3.0 - eta)
+            * (r_phot ** (3.0 - eta) - r0_cm ** (3.0 - eta))
+        )
+
+        return (csm_mass_g - mass_thresh) / jnp.maximum(csm_mass_g, 1e-300)
+
+    return Constraint(_csm_slack, scale=scale, name='csm_photosphere_inside_shell')
+
+
+def make_csm_photosphere_constraint(fixed_kappa: float = 0.1,
+                                     scale: float = 0.1) -> Constraint:
+    """Return a Constraint that enforces mass_csm_threshold < csm_mass.
+
+    The photosphere must lie inside the CSM shell for the interaction model
+    to be physical.  Captures ``fixed_kappa`` so that only the free
+    parameters ``rho``, ``eta``, ``r0``, ``csm_mass`` are needed from the
+    prior's param_dict.
+
+    Parameters
+    ----------
+    fixed_kappa : float
+        Opacity κ in cm²/g (typically fixed at 0.1).
+    scale : float
+        Normalisation for the log-barrier transition width.
+    """
+    _AU      = 1.496e13   # cm/AU
+    _MSUN    = 1.989e33   # g/M_sun
+    _kappa   = float(fixed_kappa)
+
+    def _csm_slack(params: dict) -> jnp.ndarray:
+        r0       = params['r0']
+        csm_mass = params['csm_mass']
+        rho      = params['rho']
+        eta      = params['eta']
+
+        r0_cm      = r0 * _AU
+        csm_mass_g = csm_mass * _MSUN
+        qq         = rho * r0_cm ** eta
+
+        # Guard eta ≈ 1 where (1-eta) exponent causes a singularity.
+        eta_safe = jnp.where(jnp.abs(eta - 1.0) < 0.05,
+                             jnp.asarray(0.95, dtype=eta.dtype), eta)
+
+        radius_csm = jnp.maximum(
+            ((3.0 - eta) / (4.0 * jnp.pi * jnp.maximum(qq, 1e-300))
+             * csm_mass_g
+             + r0_cm ** (3.0 - eta)) ** (1.0 / (3.0 - eta)),
+            r0_cm,
+        )
+
+        r_phot = jnp.abs(
+            (-2.0 * (1.0 - eta_safe)
+             / (3.0 * _kappa * jnp.maximum(qq, 1e-300))
+             + radius_csm ** (1.0 - eta_safe)
+             ) ** (1.0 / (1.0 - eta_safe))
+        )
+
+        mass_thresh = jnp.abs(
+            4.0 * jnp.pi * jnp.maximum(qq, 1e-300) / (3.0 - eta)
+            * (r_phot ** (3.0 - eta) - r0_cm ** (3.0 - eta))
+        )
+
+        return (csm_mass_g - mass_thresh) / jnp.maximum(csm_mass_g, 1e-300)
+
+    return Constraint(_csm_slack, scale=scale,
+                      name='csm_photosphere_inside_shell')
+
+
+# ---------------------------------------------------------------------------
 # Prior (composite)
 # ---------------------------------------------------------------------------
 
@@ -224,12 +373,16 @@ class Prior:
     >>> log_p = prior.log_prob(particles[0])                    # scalar
     """
 
-    def __init__(self, distributions: List[_Distribution]):
-        self.distributions = list(distributions)
-        self.names = [d.name for d in self.distributions]
+    def __init__(self, distributions: List[Union[_Distribution, Constraint]]):
+        # Separate parametric distributions from physics constraints.
+        self.distributions = [d for d in distributions
+                              if isinstance(d, _Distribution)]
+        self.constraints   = [d for d in distributions
+                              if isinstance(d, Constraint)]
+        self.names    = [d.name for d in self.distributions]
         self.n_params = len(self.distributions)
-        self._lows  = jnp.array([d.low  for d in self.distributions])
-        self._highs = jnp.array([d.high for d in self.distributions])
+        self._lows    = jnp.array([d.low  for d in self.distributions])
+        self._highs   = jnp.array([d.high for d in self.distributions])
 
     # ------------------------------------------------------------------
     # Sampling
@@ -257,21 +410,33 @@ class Prior:
     def log_prob(self, params: jnp.ndarray) -> jnp.ndarray:
         """Evaluate the joint log-prior for a parameter vector of shape ``(n_params,)``.
 
-        This is JAX-traceable and can be used inside ``@jax.jit``.
+        Includes contributions from all ``Constraint`` instances (differentiable
+        log-barrier terms) in addition to the marginal distribution log-probs.
+        JAX-traceable and usable inside ``@jax.jit``.
         """
         log_p = jnp.array(0.0)
         for i, d in enumerate(self.distributions):
             log_p = log_p + d.log_prob(params[i])
+        if self.constraints:
+            param_dict = {d.name: params[i]
+                          for i, d in enumerate(self.distributions)}
+            for c in self.constraints:
+                log_p = log_p + c.log_prob(param_dict)
         return log_p
 
     def log_prob_fn(self):
         """Return a pure JAX-traceable function ``params -> log_prior``."""
-        dists = self.distributions  # captured in closure
+        dists       = self.distributions
+        constraints = self.constraints
 
         def _fn(params: jnp.ndarray) -> jnp.ndarray:
             log_p = jnp.array(0.0)
             for i, d in enumerate(dists):
                 log_p = log_p + d.log_prob(params[i])
+            if constraints:
+                param_dict = {d.name: params[i] for i, d in enumerate(dists)}
+                for c in constraints:
+                    log_p = log_p + c.log_prob(param_dict)
             return log_p
 
         return _fn
@@ -293,4 +458,6 @@ class Prior:
 
     def __repr__(self) -> str:
         items = "\n  ".join(repr(d) for d in self.distributions)
+        if self.constraints:
+            items += "\n  " + "\n  ".join(repr(c) for c in self.constraints)
         return f"Prior([\n  {items}\n])"
