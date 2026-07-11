@@ -11,20 +11,20 @@ RUN apt-get update \
 
 RUN pip3 install uv
 
+# External deps first (heavy wheels + a remote git checkout) so a local source
+# change doesn't invalidate their cache layer. JAX (CPU), then the handley-lab
+# nested-sampling blackjax fork the NestedSampler needs — pinned to a commit for
+# reproducible builds — plus anesthetic. NOT the [inference]/[all] extra (below):
+# it pins PyPI blackjax (>=1.0), a *different* package from this fork.
+RUN uv pip install --system --break-system-packages jax
+RUN uv pip install --system --break-system-packages \
+      "blackjax @ git+https://github.com/handley-lab/blackjax@2180e29ffb645b2c46b76c768229c7c24212446c" \
+      anesthetic
+
+# redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
 WORKDIR /src
 COPY . /src
-
-# JAX (CPU) first so a JAX problem is isolated from the package install.
-RUN uv pip install --system --break-system-packages jax
-
-# redback-jax core (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
-# NOT the [inference]/[all] extra: it pins PyPI blackjax (>=1.0), a *different*
-# package from the handley-lab nested-sampling fork that NestedSampler needs.
-# Install the fork explicitly afterwards so it wins.
 RUN uv pip install --system --break-system-packages .
-RUN uv pip install --system --break-system-packages \
-      "blackjax @ git+https://github.com/handley-lab/blackjax@nested_sampling" \
-      anesthetic
 
 # Fail the build if the runtime + nested-sampling API aren't importable.
 RUN python3 -c "import redback_jax, jax, blackjax; from blackjax.ns.utils import log_weights; print('redback-jax + jax', jax.__version__, '+ blackjax(NS)', blackjax.__version__)"
