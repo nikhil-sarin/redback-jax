@@ -1,0 +1,36 @@
+# GPU runtime image for redback-jax (jax[cuda12]).
+# Same as containers/Dockerfile but CUDA JAX so the float32-safe models run on a
+# GPU worker. Distributed via CVMFS (no per-job pull), which matters here: the
+# CUDA wheels make this image multi-GB.
+# Build (context = repo root): docker build -f containers/Dockerfile.gpu -t redback-jax-gpu:latest .
+FROM ubuntu:24.04
+
+ENV PIP_BREAK_SYSTEM_PACKAGES=1 DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y python3 python3-pip git build-essential \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install uv
+
+# External deps first (heavy wheels + a remote git checkout) so a local source
+# change doesn't invalidate their cache layer. The jax[cuda12] wheels bundle
+# CUDA 12 + cuDNN, so only a host driver is needed at runtime; cuda12 (not 13)
+# matches the broadest GPU-node driver pool. Then the handley-lab nested-sampling
+# blackjax fork (pinned to a commit for reproducible builds) + anesthetic. NOT the
+# [inference]/[all] extra (below): it pins PyPI blackjax, a different package.
+RUN uv pip install --system --break-system-packages "jax[cuda12]"
+RUN uv pip install --system --break-system-packages \
+      "blackjax @ git+https://github.com/handley-lab/blackjax@2180e29ffb645b2c46b76c768229c7c24212446c" \
+      anesthetic
+
+# redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
+WORKDIR /src
+COPY . /src
+RUN uv pip install --system --break-system-packages .
+
+# Import check: pin JAX to CPU so the GPU-less builder doesn't fail on cuInit
+# (at runtime on a GPU node, JAX auto-selects CUDA).
+RUN JAX_PLATFORMS=cpu python3 -c "import redback_jax, jax, blackjax; from blackjax.ns.utils import log_weights; print('redback-jax + jax', jax.__version__, '+ blackjax(NS)', blackjax.__version__)"
+
+CMD ["python3"]
