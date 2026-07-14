@@ -1,9 +1,12 @@
-# Build the redback-jax runtime containers as a CI check.
+# Build the redback-jax runtime containers as a CI check, and publish them to
+# Docker Hub on pushes to main.
 #
-# Build ONLY — this validates that both Dockerfiles build (deps resolve, the
-# handley-lab blackjax fork installs, `import redback_jax, jax, blackjax`
-# succeeds). It does NOT log in to or push to any registry; publishing is a
-# manual step.
+# On pull requests this validates that both Dockerfiles build (deps resolve,
+# the handley-lab blackjax fork installs, `import redback_jax, jax, blackjax`
+# succeeds) WITHOUT pushing anywhere. On pushes to main, it additionally logs
+# in to Docker Hub and pushes nsarinastro/redback-jax:latest (CPU) and
+# nsarinastro/redback-jax:gpu. Requires repo secrets DOCKERHUB_USERNAME and
+# DOCKERHUB_TOKEN (a Docker Hub access token with Read/Write scope).
 name: Build Docker image
 
 on:
@@ -24,9 +27,11 @@ jobs:
       matrix:
         include:
           - dockerfile: containers/Dockerfile
-            tag: redback-jax:ci
+            tag: nsarinastro/redback-jax:latest
+            ci_tag: redback-jax:ci
           - dockerfile: containers/Dockerfile.gpu
-            tag: redback-jax-gpu:ci
+            tag: nsarinastro/redback-jax:gpu
+            ci_tag: redback-jax-gpu:ci
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,13 +40,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (no push)
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
-          push: false
-          tags: ${{ matrix.tag }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && matrix.tag || matrix.ci_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
