@@ -20,7 +20,7 @@ RUN pip3 install uv
 # mainline blackjax for the SMC+NUTS sampler used via run_nested_sampling (the
 # handley-lab NS fork is avoided: its older JAX API breaks on current JAX).
 RUN uv pip install --system --break-system-packages "jax[cuda12]"
-RUN uv pip install --system --break-system-packages blackjax
+RUN uv pip install --system --break-system-packages blackjax anesthetic
 
 # redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
 WORKDIR /src
@@ -29,6 +29,6 @@ RUN uv pip install --system --break-system-packages .
 
 # Import check: pin JAX to CPU so the GPU-less builder doesn't fail on cuInit
 # (at runtime on a GPU node, JAX auto-selects CUDA).
-RUN JAX_PLATFORMS=cpu python3 -c "import redback_jax, jax, blackjax; assert hasattr(blackjax, 'nuts'); print('redback-jax + jax', jax.__version__, '+ blackjax', blackjax.__version__)"
+RUN JAX_PLATFORMS=cpu python3 -c "import redback_jax, jax, blackjax; from redback_jax.inference.sampler import run_nested_sampling; print('redback-jax + jax', jax.__version__, '+ blackjax', blackjax.__version__)"
 
 CMD ["python3"]

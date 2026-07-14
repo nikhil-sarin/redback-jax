@@ -16,7 +16,7 @@ RUN pip3 install uv
 # used via run_nested_sampling. (The handley-lab nested-sampling fork is avoided:
 # its older JAX API breaks on current JAX, and mainline SMC still gives evidence.)
 RUN uv pip install --system --break-system-packages jax
-RUN uv pip install --system --break-system-packages blackjax
+RUN uv pip install --system --break-system-packages blackjax anesthetic
 
 # redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
 WORKDIR /src
@@ -24,6 +24,6 @@ COPY . /src
 RUN uv pip install --system --break-system-packages .
 
 # Fail the build if the runtime + nested-sampling API aren't importable.
-RUN python3 -c "import redback_jax, jax, blackjax; assert hasattr(blackjax, 'nuts'); print('redback-jax + jax', jax.__version__, '+ blackjax', blackjax.__version__)"
+RUN python3 -c "import redback_jax, jax, blackjax; from redback_jax.inference.sampler import run_nested_sampling; print('redback-jax + jax', jax.__version__, '+ blackjax', blackjax.__version__)"
 
 CMD ["python3"]
