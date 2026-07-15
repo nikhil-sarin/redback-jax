@@ -116,7 +116,7 @@ class NSResult:
             print(row)
 
     def __repr__(self) -> str:
-        n = len(next(iter(self.samples.values())))
+        n = len(self.log_weights) if self.log_weights is not None else 0
         return f"NSResult(logZ={self.logZ:.2f}, n_samples={n})"  # noqa: E231
 
 
