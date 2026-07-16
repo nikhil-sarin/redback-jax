@@ -218,7 +218,9 @@ class Transient:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-    # Expose y/y_err by physical name (per data_mode) so fit_transient can read them.
+    # Expose y/y_err by physical name (per data_mode) so fit_transient can read
+    # them. flux (erg/s/cm^2) and flux_density (mJy) are distinct units, so keep
+    # separate accessors rather than conflating them.
     @property
     def magnitudes(self):
         return self.y if self.data_mode == "magnitude" else None
@@ -229,11 +231,21 @@ class Transient:
 
     @property
     def fluxes(self):
-        return self.y if self.data_mode in ("flux", "flux_density") else None
+        """Flux in erg/s/cm^2 (data_mode 'flux')."""
+        return self.y if self.data_mode == "flux" else None
 
     @property
     def flux_errors(self):
-        return self.y_err if self.data_mode in ("flux", "flux_density") else None
+        return self.y_err if self.data_mode == "flux" else None
+
+    @property
+    def flux_densities(self):
+        """Flux density in mJy (data_mode 'flux_density')."""
+        return self.y if self.data_mode == "flux_density" else None
+
+    @property
+    def flux_density_errors(self):
+        return self.y_err if self.data_mode == "flux_density" else None
 
     @classmethod
     def from_data_file(

@@ -147,7 +147,8 @@ class TestTransient:
         assert "n_points=10" in repr_str
 
     def test_flux_magnitude_views(self):
-        """magnitudes/fluxes expose y/y_err by data_mode (used by fit_transient)."""
+        """magnitudes/fluxes/flux_densities expose y/y_err by data_mode, keeping
+        flux (erg/s/cm^2) and flux_density (mJy) as distinct units."""
         time = np.linspace(0, 10, 8)
         y = np.random.random(8)
         y_err = 0.1 * y
@@ -156,17 +157,19 @@ class TestTransient:
         assert np.allclose(mag.magnitudes, y)
         assert np.allclose(mag.magnitude_errors, y_err)
         assert mag.fluxes is None
-        assert mag.flux_errors is None
+        assert mag.flux_densities is None
 
         flux = Transient(time=time, y=y, y_err=y_err, data_mode="flux")
         assert np.allclose(flux.fluxes, y)
         assert np.allclose(flux.flux_errors, y_err)
         assert flux.magnitudes is None
-        assert flux.magnitude_errors is None
+        assert flux.flux_densities is None
 
-        # flux_density is treated as a flux view too
+        # flux_density is a distinct unit (mJy) with its own accessor
         fd = Transient(time=time, y=y, y_err=y_err, data_mode="flux_density")
-        assert np.allclose(fd.fluxes, y)
+        assert np.allclose(fd.flux_densities, y)
+        assert np.allclose(fd.flux_density_errors, y_err)
+        assert fd.fluxes is None
         assert fd.magnitudes is None
 
 
