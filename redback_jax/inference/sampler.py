@@ -6,14 +6,15 @@ BlackJAX's nested sampling and MCMC algorithms, following the style of
 JAX-bandflux and redback's sampler API.
 """
 
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, Callable, Optional, Tuple, Any, NamedTuple
-from functools import partial
 
 try:
     import blackjax
+
     HAS_BLACKJAX = True
 except ImportError:
     HAS_BLACKJAX = False
@@ -21,6 +22,7 @@ except ImportError:
 
 try:
     import anesthetic
+
     HAS_ANESTHETIC = True
 except ImportError:
     HAS_ANESTHETIC = False
@@ -44,6 +46,7 @@ class SamplerResult(NamedTuple):
     metadata : dict
         Additional metadata from the sampling run
     """
+
     samples: Dict[str, jnp.ndarray]
     log_likelihoods: jnp.ndarray
     log_weights: jnp.ndarray
@@ -85,7 +88,7 @@ def create_gaussian_likelihood(
     model_fn: Callable[[Dict[str, float]], jnp.ndarray],
     observed_data: jnp.ndarray,
     errors: jnp.ndarray,
-    reduce_fn: Optional[Callable] = None
+    reduce_fn: Optional[Callable] = None,
 ) -> Callable[[Dict[str, float]], float]:
     """Create a Gaussian likelihood function.
 
@@ -105,6 +108,7 @@ def create_gaussian_likelihood(
     callable
         Log-likelihood function
     """
+
     @jax.jit
     def loglikelihood(params: Dict[str, float]) -> float:
         model = model_fn(params)
@@ -128,7 +132,7 @@ def run_nested_sampling(
     num_mcmc_steps: int = 20,
     max_iterations: int = 100,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> SamplerResult:
     """Run Sequential Monte Carlo (SMC) sampling using BlackJAX.
 
@@ -165,8 +169,7 @@ def run_nested_sampling(
     """
     if not HAS_BLACKJAX:
         raise ImportError(
-            "blackjax is required for sampling. "
-            "Install with: pip install blackjax"
+            "blackjax is required for sampling. " "Install with: pip install blackjax"
         )
 
     if rng_key is None:
@@ -243,15 +246,17 @@ def run_nested_sampling(
     log_evidence_error = jnp.std(log_likes) / jnp.sqrt(n_particles)
 
     if verbose:
-        print(f"Estimated log evidence: {log_evidence:.4f} +/- {log_evidence_error:.4f}")
+        print(
+            f"Estimated log evidence: {log_evidence:.4f} +/- {log_evidence_error:.4f}"  # noqa: E231,E501
+        )
 
     # Prepare metadata
     metadata = {
-        'n_particles': n_particles,
-        'n_samples': n_particles,
-        'param_names': param_names,
-        'prior_bounds': prior_bounds,
-        'method': 'importance_sampling'
+        "n_particles": n_particles,
+        "n_samples": n_particles,
+        "param_names": param_names,
+        "prior_bounds": prior_bounds,
+        "method": "importance_sampling",
     }
 
     return SamplerResult(
@@ -260,7 +265,7 @@ def run_nested_sampling(
         log_weights=log_weights,
         log_evidence=float(log_evidence),
         log_evidence_error=float(log_evidence_error),
-        metadata=metadata
+        metadata=metadata,
     )
 
 
@@ -272,7 +277,7 @@ def run_mcmc(
     n_chains: int = 4,
     step_size: float = 0.01,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> SamplerResult:
     """Run MCMC sampling using BlackJAX's NUTS sampler.
 
@@ -307,8 +312,7 @@ def run_mcmc(
     """
     if not HAS_BLACKJAX:
         raise ImportError(
-            "blackjax is required for sampling. "
-            "Install with: pip install blackjax"
+            "blackjax is required for sampling. " "Install with: pip install blackjax"
         )
 
     if rng_key is None:
@@ -336,8 +340,10 @@ def run_mcmc(
     # Initialize chains
     rng_key, init_key = jax.random.split(rng_key)
     initial_positions = jax.random.uniform(
-        init_key, shape=(n_chains, n_params),
-        minval=0.1, maxval=0.9  # Start away from boundaries
+        init_key,
+        shape=(n_chains, n_params),
+        minval=0.1,
+        maxval=0.9,  # Start away from boundaries
     )
 
     # Define one step
@@ -379,30 +385,28 @@ def run_mcmc(
     # Convert to parameter space
     samples_dict = {}
     for i, name in enumerate(param_names):
-        samples_dict[name] = jnp.array([
-            prior_fn(s)[name] for s in all_samples
-        ])
+        samples_dict[name] = jnp.array([prior_fn(s)[name] for s in all_samples])
 
     # Equal weights for MCMC
     n_total = len(all_loglikes)
     log_weights = jnp.zeros(n_total)
 
     metadata = {
-        'n_samples': n_samples,
-        'n_warmup': n_warmup,
-        'n_chains': n_chains,
-        'total_samples': n_total,
-        'param_names': param_names,
-        'prior_bounds': prior_bounds
+        "n_samples": n_samples,
+        "n_warmup": n_warmup,
+        "n_chains": n_chains,
+        "total_samples": n_total,
+        "param_names": param_names,
+        "prior_bounds": prior_bounds,
     }
 
     return SamplerResult(
         samples=samples_dict,
         log_likelihoods=jnp.array(all_loglikes),
         log_weights=log_weights,
-        log_evidence=float('nan'),  # MCMC doesn't compute evidence
-        log_evidence_error=float('nan'),
-        metadata=metadata
+        log_evidence=float("nan"),  # MCMC doesn't compute evidence
+        log_evidence_error=float("nan"),
+        metadata=metadata,
     )
 
 
@@ -413,7 +417,7 @@ def fit_transient(
     sampler: str = "nested",
     sampler_kwargs: Optional[Dict] = None,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> SamplerResult:
     """Fit a transient model to observational data.
 
@@ -480,14 +484,19 @@ def fit_transient(
     >>> print(f"Log evidence: {result.log_evidence:.2f}")
     """
     # Extract observational data
-    if hasattr(transient, 'magnitudes') and transient.magnitudes is not None:
+    if hasattr(transient, "magnitudes") and transient.magnitudes is not None:
         observed_data = jnp.asarray(transient.magnitudes)
         errors = jnp.asarray(transient.magnitude_errors)
-    elif hasattr(transient, 'fluxes') and transient.fluxes is not None:
+    elif hasattr(transient, "fluxes") and transient.fluxes is not None:
         observed_data = jnp.asarray(transient.fluxes)
         errors = jnp.asarray(transient.flux_errors)
+    elif hasattr(transient, "flux_densities") and transient.flux_densities is not None:
+        observed_data = jnp.asarray(transient.flux_densities)
+        errors = jnp.asarray(transient.flux_density_errors)
     else:
-        raise ValueError("Transient must have magnitudes or fluxes data")
+        raise ValueError(
+            "Transient must have magnitudes, fluxes, or flux_densities data"
+        )
 
     # Create likelihood function
     likelihood_fn = create_gaussian_likelihood(model_fn, observed_data, errors)
@@ -503,7 +512,7 @@ def fit_transient(
             prior_bounds,
             rng_key=rng_key,
             verbose=verbose,
-            **sampler_kwargs
+            **sampler_kwargs,
         )
     elif sampler == "mcmc":
         result = run_mcmc(
@@ -511,7 +520,7 @@ def fit_transient(
             prior_bounds,
             rng_key=rng_key,
             verbose=verbose,
-            **sampler_kwargs
+            **sampler_kwargs,
         )
     else:
         raise ValueError(f"Unknown sampler: {sampler}. Use 'nested' or 'mcmc'.")
@@ -538,11 +547,12 @@ def to_anesthetic_samples(result: SamplerResult):
         If anesthetic is not installed
     """
     if not HAS_ANESTHETIC:
-        raise ImportError("anesthetic is required for this function. "
-                          "Install with: pip install anesthetic")
+        raise ImportError(
+            "anesthetic is required for this function. "
+            "Install with: pip install anesthetic"
+        )
 
-    param_names = result.metadata['param_names']
-    n_samples = len(result.log_likelihoods)
+    param_names = result.metadata["param_names"]
 
     # Create DataFrame with samples
     data = {}
@@ -550,22 +560,17 @@ def to_anesthetic_samples(result: SamplerResult):
         data[name] = np.array(result.samples[name])
 
     # Add log-likelihood
-    data['logL'] = np.array(result.log_likelihoods)
+    data["logL"] = np.array(result.log_likelihoods)
 
     # Create anesthetic samples
     if np.isfinite(result.log_evidence):
         # Nested sampling result
         samples = anesthetic.NestedSamples(
-            data=data,
-            columns=param_names + ['logL'],
-            logL='logL'
+            data=data, columns=param_names + ["logL"], logL="logL"
         )
     else:
         # MCMC result
-        samples = anesthetic.Samples(
-            data=data,
-            columns=param_names + ['logL']
-        )
+        samples = anesthetic.Samples(data=data, columns=param_names + ["logL"])
 
     return samples
 
@@ -585,16 +590,16 @@ def summarize_result(result: SamplerResult) -> Dict[str, Dict[str, float]]:
     """
     summary = {}
 
-    for name in result.metadata['param_names']:
+    for name in result.metadata["param_names"]:
         samples = result.samples[name]
         summary[name] = {
-            'mean': float(jnp.mean(samples)),
-            'std': float(jnp.std(samples)),
-            'median': float(jnp.median(samples)),
-            'q16': float(jnp.percentile(samples, 16)),
-            'q84': float(jnp.percentile(samples, 84)),
-            'q05': float(jnp.percentile(samples, 5)),
-            'q95': float(jnp.percentile(samples, 95)),
+            "mean": float(jnp.mean(samples)),
+            "std": float(jnp.std(samples)),
+            "median": float(jnp.median(samples)),
+            "q16": float(jnp.percentile(samples, 16)),
+            "q84": float(jnp.percentile(samples, 84)),
+            "q05": float(jnp.percentile(samples, 5)),
+            "q95": float(jnp.percentile(samples, 95)),
         }
 
     return summary
