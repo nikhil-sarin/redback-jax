@@ -19,6 +19,85 @@ class TestInferenceModule:
         assert inference is not None
 
 
+class TestAdaptiveTemperedSMC:
+    """run_nested_sampling must actually anneal to the posterior.
+
+    The truth sits far from the prior midpoint, so a sampler that returned
+    prior draws (rather than posterior samples) would land on the prior
+    median with the prior's width and fail every assertion here.
+    """
+
+    TRUTH = {"x": 4.0, "y": 3.0}
+    SIGMA = 0.5
+    BOUNDS = {"x": (-10.0, 10.0), "y": (0.0, 20.0)}
+
+    def _run(self):
+        import jax
+
+        from redback_jax.inference.sampler import HAS_BLACKJAX, run_nested_sampling
+
+        if not HAS_BLACKJAX:
+            pytest.skip("blackjax not installed")
+
+        def loglike(p):
+            return -0.5 * (
+                ((p["x"] - self.TRUTH["x"]) / self.SIGMA) ** 2
+                + ((p["y"] - self.TRUTH["y"]) / self.SIGMA) ** 2
+            )
+
+        return run_nested_sampling(
+            loglike,
+            self.BOUNDS,
+            n_particles=500,
+            num_mcmc_steps=10,
+            rng_key=jax.random.PRNGKey(0),
+            verbose=False,
+        )
+
+    def test_recovers_truth_not_prior(self):
+        """Posterior medians track the truth, not the prior midpoint."""
+        import numpy as np
+
+        result = self._run()
+        for name, truth in self.TRUTH.items():
+            samples = np.asarray(result.samples[name])
+            lo, hi = self.BOUNDS[name]
+            prior_median = (lo + hi) / 2
+            median = float(np.median(samples))
+            assert abs(median - truth) < 0.25, f"{name}: {median} != {truth}"
+            # Guards the original bug: prior draws would sit at prior_median.
+            assert abs(median - truth) < abs(median - prior_median)
+
+    def test_posterior_width_matches_likelihood(self):
+        """Spread is the likelihood's, not the prior's (uniform std ~5.8)."""
+        import numpy as np
+
+        result = self._run()
+        for name in self.TRUTH:
+            std = float(np.std(np.asarray(result.samples[name])))
+            assert abs(std - self.SIGMA) < 0.25, f"{name}: std {std}"
+
+    def test_log_evidence_matches_analytic(self):
+        """Uniform prior x Gaussian likelihood has a closed-form evidence."""
+        import numpy as np
+
+        result = self._run()
+        volume = np.prod([hi - lo for lo, hi in self.BOUNDS.values()])
+        expected = np.log(
+            (2 * np.pi * self.SIGMA**2) ** (len(self.BOUNDS) / 2) / volume
+        )
+        assert abs(result.log_evidence - expected) < 0.5
+        # The old estimator (std of the log-likelihoods) ran to ~1e5 here.
+        assert 0.0 < result.log_evidence_error < 1.0
+
+    def test_anneals_to_posterior(self):
+        """SMC reaches temperature 1 and reports its method."""
+        result = self._run()
+        assert result.metadata["method"] == "adaptive_tempered_smc"
+        assert result.metadata["final_temperature"] == pytest.approx(1.0)
+        assert result.metadata["n_tempering_steps"] >= 1
+
+
 class TestNSResult:
     """Test cases for the NSResult container."""
 
