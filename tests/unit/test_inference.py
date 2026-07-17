@@ -97,6 +97,32 @@ class TestAdaptiveTemperedSMC:
         assert result.metadata["final_temperature"] == pytest.approx(1.0)
         assert result.metadata["n_tempering_steps"] >= 1
 
+    def test_warns_when_not_annealed(self):
+        """Hitting max_iterations before temperature 1 warns instead of lying."""
+        import jax
+
+        from redback_jax.inference.sampler import HAS_BLACKJAX, run_nested_sampling
+
+        if not HAS_BLACKJAX:
+            pytest.skip("blackjax not installed")
+
+        def loglike(p):
+            return -0.5 * (
+                ((p["x"] - self.TRUTH["x"]) / self.SIGMA) ** 2
+                + ((p["y"] - self.TRUTH["y"]) / self.SIGMA) ** 2
+            )
+
+        with pytest.warns(RuntimeWarning, match="not fully|before reaching"):
+            result = run_nested_sampling(
+                loglike,
+                self.BOUNDS,
+                n_particles=200,
+                max_iterations=1,  # too few to reach the posterior
+                rng_key=jax.random.PRNGKey(0),
+                verbose=False,
+            )
+        assert result.metadata["final_temperature"] < 1.0
+
 
 class TestNSResult:
     """Test cases for the NSResult container."""

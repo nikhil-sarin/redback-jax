@@ -281,7 +281,8 @@ def run_nested_sampling(
 
     # Var(log Z) ~ sum of the per-step relative variances of the reweighting
     # (delta method, treating the steps as independent) -- an approximation.
-    log_evidence_error = float(jnp.sqrt(rel_var))
+    # Clamp: rounding can drive rel_var slightly negative and NaN the sqrt.
+    log_evidence_error = float(jnp.sqrt(jnp.maximum(0.0, rel_var)))
 
     # Particles are equally weighted after resampling, so these are posterior
     # samples directly -- no importance weights left to apply.
