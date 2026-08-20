@@ -16,6 +16,7 @@ on:
   pull_request:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -42,7 +43,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: github.repository == 'nikhil-sarin/redback-jax' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.repository == 'nikhil-sarin/redback-jax' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -54,7 +55,8 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
-          push: ${{ github.repository == 'nikhil-sarin/redback-jax' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          tags: ${{ (github.repository == 'nikhil-sarin/redback-jax' && github.event_name == 'push' && github.ref == 'refs/heads/main') && matrix.tag || matrix.ci_tag }}
+          push: ${{ github.repository == 'nikhil-sarin/redback-jax' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
+          tags: ${{ (github.repository == 'nikhil-sarin/redback-jax' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') && matrix.tag || matrix.ci_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          no-cache: ${{ github.event_name == 'workflow_dispatch' }}
