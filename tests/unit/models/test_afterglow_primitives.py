@@ -2,11 +2,13 @@
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from redback_jax.afterglow import (
     angular_mesh,
     jet_structure,
     legacy_impulsive_dynamics,
+    native_afterglow_flux_density,
     observer_angle,
     observer_state,
     power_law_density,
@@ -15,6 +17,15 @@ from redback_jax.afterglow import (
     synchrotron_log_flux,
 )
 from redback_jax.constants import proton_mass
+from redback_jax.models import (
+    MODEL_REGISTRY,
+    alternativepowerlaw_redback,
+    doublegaussian_redback,
+    gaussian_redback,
+    powerlaw_redback,
+    tophat_redback,
+    twocomponent_redback,
+)
 
 
 def test_angular_mesh_has_expected_size_and_solid_angle():
@@ -121,3 +132,56 @@ def test_synchrotron_pipeline_matches_native_redback_fixture():
                                np.log10(expected_observer_time), rtol=0.0, atol=0.015)
     np.testing.assert_allclose(log10_flux[indices], np.log10(expected_flux),
                                rtol=0.0, atol=0.05)
+
+
+def test_composed_tophat_lightcurve_matches_native_redback_fixture():
+    result = native_afterglow_flux_density(
+        time=jnp.array([1.0, 10.0, 100.0]),
+        frequency=1.0e9,
+        redshift=0.01,
+        theta_observer=0.05,
+        log10_energy=52.0,
+        theta_core=0.2,
+        theta_jet=0.2,
+        log10_density=0.0,
+        electron_index=2.2,
+        log10_epsilon_e=-1.0,
+        log10_epsilon_b=-2.0,
+        gamma_initial=100.0,
+        accelerated_fraction=1.0,
+        log10_luminosity_distance=np.log10(1.3776657447116507e26),
+        structure_kind="tophat",
+        expansion=False,
+        resolution=8,
+        steps=64,
+    )
+    expected_mjy = np.array([108.08590549, 120.30437189, 195.31447198])
+    np.testing.assert_allclose(result, expected_mjy, rtol=0.015)
+
+
+def test_public_tophat_wrapper_and_registry():
+    result = tophat_redback(
+        jnp.array([1.0, 10.0, 100.0]), 0.01, 0.05, 52.0, 0.2, 0.0,
+        2.2, -1.0, -2.0, 100.0, 1.0, frequency=1.0e9,
+        output_format="flux_density", expansion=False, res=8, steps=64)
+    expected_mjy = np.array([108.08590549, 120.30437189, 195.31447198])
+    np.testing.assert_allclose(result, expected_mjy, rtol=0.02)
+    assert MODEL_REGISTRY["tophat_redback"] is tophat_redback
+    for name in ("gaussian_redback", "twocomponent_redback", "powerlaw_redback",
+                 "alternativepowerlaw_redback", "doublegaussian_redback"):
+        assert name in MODEL_REGISTRY
+
+
+@pytest.mark.parametrize(("model", "expected_mjy"), [
+    (gaussian_redback, [76.75951234, 77.22319264, 79.90381173]),
+    (twocomponent_redback, [60.67329546, 50.68955938, 66.58012673]),
+    (powerlaw_redback, [94.22838090, 94.27717169, 113.34948292]),
+    (alternativepowerlaw_redback, [56.75649553, 58.53103025, 52.94765781]),
+    (doublegaussian_redback, [86.57037117, 97.23753895, 111.65166607]),
+])
+def test_structured_public_wrappers_match_native_redback(model, expected_mjy):
+    result = model(
+        jnp.array([1.0, 10.0, 100.0]), 0.01, 0.05, 52.0, 0.1, 0.3,
+        0.0, 2.2, -1.0, -2.0, 100.0, 1.0, frequency=1.0e9,
+        output_format="flux_density", expansion=False, res=8, steps=64)
+    np.testing.assert_allclose(result, expected_mjy, rtol=0.025)
