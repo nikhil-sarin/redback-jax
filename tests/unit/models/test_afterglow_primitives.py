@@ -8,6 +8,8 @@ import pytest
 from redback_jax.afterglow import (
     angular_mesh,
     arbitrary_csm_impulsive_dynamics,
+    constant_engine_cumulative_log10,
+    fallback_engine_cumulative_log10,
     forward_shock_state,
     jet_structure,
     legacy_impulsive_dynamics,
@@ -17,9 +19,11 @@ from redback_jax.afterglow import (
     observer_state,
     power_law_density,
     power_law_log_density,
+    powered_thin_shell_dynamics,
     smoothly_broken_power_law_log_density,
     swept_mass_derivative,
     synchrotron_log_flux,
+    tabulated_engine_cumulative_log10,
     tabulated_log_density,
 )
 from redback_jax.constants import proton_mass
@@ -42,6 +46,11 @@ from redback_jax.models import (
 
 def _power_law_profile(log10_radius, parameters):
     return power_law_log_density(log10_radius, *parameters)
+
+
+def _no_engine(time_seconds, parameters):
+    del parameters
+    return jnp.full_like(time_seconds, -jnp.inf)
 
 
 def test_angular_mesh_has_expected_size_and_solid_angle():
@@ -206,6 +215,139 @@ def test_broken_csm_lightcurve_is_finite_and_differentiable():
 
     assert bool(jnp.isfinite(total_flux(2.0)))
     assert bool(jnp.isfinite(jax.grad(total_flux)(2.0)))
+
+
+def test_engine_cumulative_energy_normalization():
+    total_energy = 52.0
+    duration = 5.0
+    constant = constant_engine_cumulative_log10(
+        jnp.array([0.0, 0.5e5, 1.0e5, 2.0e5]), (total_energy, duration)
+    )
+    assert bool(jnp.isneginf(constant[0]))
+    np.testing.assert_allclose(constant[1:], total_energy + np.log10([0.5, 1.0, 1.0]))
+    fallback = fallback_engine_cumulative_log10(
+        jnp.array([0.0, 1.0e5, 1.0e8]), (total_energy, duration)
+    )
+    assert bool(jnp.isneginf(fallback[0]))
+    assert fallback[1] == pytest.approx(total_energy + np.log10(0.4))
+    assert fallback[2] < total_energy
+    assert fallback[2] > total_energy - 0.01
+    tabulated = tabulated_engine_cumulative_log10(
+        jnp.array([0.0, 10.0, 100.0]), (jnp.array([1.0, 2.0]), jnp.array([50.0, 52.0]))
+    )
+    assert bool(jnp.isneginf(tabulated[0]))
+    np.testing.assert_allclose(tabulated[1:], [50.0, 52.0])
+
+
+def test_powered_thin_shell_without_engine_recovers_impulsive_dynamics():
+    initial_mass = np.log10(4.0 * np.pi / 3.0) + 30.0 + np.log10(proton_mass)
+    generalized = arbitrary_csm_impulsive_dynamics(
+        jnp.array([100.0]),
+        jnp.array([52.0]),
+        (0.0, 0.0, 0.0),
+        initial_mass,
+        _power_law_profile,
+        steps=96,
+    )
+    powered = powered_thin_shell_dynamics(
+        jnp.array([100.0]),
+        jnp.array([52.0]),
+        (0.0, 0.0, 0.0),
+        initial_mass,
+        _power_law_profile,
+        (),
+        _no_engine,
+        steps=96,
+    )
+    indices = jnp.array([0, 24, 48, 72, 95])
+    np.testing.assert_allclose(
+        powered[0][:, indices], generalized[0][:, indices], rtol=2e-5, atol=2e-6
+    )
+    np.testing.assert_allclose(powered[7], 52.0, atol=1e-6)
+
+
+def test_fallback_power_keeps_the_late_shell_faster():
+    initial_mass = np.log10(4.0 * np.pi / 3.0) + 30.0 + np.log10(proton_mass)
+    no_engine = powered_thin_shell_dynamics(
+        jnp.array([30.0]),
+        jnp.array([51.0]),
+        (0.0, 0.0, 0.0),
+        initial_mass,
+        _power_law_profile,
+        (),
+        _no_engine,
+        steps=128,
+    )
+    fallback = powered_thin_shell_dynamics(
+        jnp.array([30.0]),
+        jnp.array([51.0]),
+        (0.0, 0.0, 0.0),
+        initial_mass,
+        _power_law_profile,
+        (52.0, np.log10(30.0 * 86400.0)),
+        fallback_engine_cumulative_log10,
+        steps=128,
+    )
+    assert fallback[1][0, 96] > no_engine[1][0, 96]
+    assert fallback[7][0, -1] > 51.9
+
+
+def test_powered_redback_lightcurve_is_delayed_relative_to_impulse():
+    common = dict(
+        time=jnp.array([1.0, 10.0, 100.0]),
+        frequency=3.0e9,
+        redshift=0.01,
+        theta_observer=0.05,
+        theta_core=0.2,
+        theta_jet=0.2,
+        log10_density=0.0,
+        electron_index=2.2,
+        log10_epsilon_e=-1.0,
+        log10_epsilon_b=-2.0,
+        gamma_initial=30.0,
+        accelerated_fraction=1.0,
+        log10_luminosity_distance=jnp.log10(1.3776657447116507e26),
+        structure_kind="tophat",
+        expansion=False,
+        resolution=6,
+        steps=128,
+    )
+    impulsive = native_afterglow_flux_density(log10_energy=np.log10(1.1e52), **common)
+    powered = native_afterglow_flux_density(
+        log10_energy=51.0,
+        engine_function=fallback_engine_cumulative_log10,
+        engine_parameters=(52.0, np.log10(30.0 * 86400.0)),
+        **common,
+    )
+    assert bool(jnp.all(jnp.isfinite(powered)))
+    assert bool(jnp.all(powered < impulsive))
+
+
+def test_powered_public_wrapper_has_engine_timescale_gradient():
+    def total_flux(log10_break_time):
+        return tophat_redback(
+            jnp.array([1.0, 10.0]),
+            0.01,
+            0.05,
+            51.0,
+            0.2,
+            0.0,
+            2.2,
+            -1.0,
+            -2.0,
+            30.0,
+            1.0,
+            frequency=3.0e9,
+            output_format="flux_density",
+            expansion=False,
+            res=6,
+            steps=96,
+            engine_function=fallback_engine_cumulative_log10,
+            engine_parameters=(52.0, log10_break_time),
+        ).sum()
+
+    gradient = jax.grad(total_flux)(np.log10(30.0 * 86400.0))
+    assert bool(jnp.isfinite(gradient))
 
 
 def test_legacy_dynamics_matches_native_redback_fixture():
