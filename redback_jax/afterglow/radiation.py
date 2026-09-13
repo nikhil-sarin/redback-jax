@@ -58,6 +58,8 @@ def forward_shock_state(
     expansion=False,
     expansion_index=1.0,
     resolution=50,
+    radius_override=None,
+    log10_local_density_override=None,
 ):
     """Calculate shock and synchrotron state for one polar jet ring."""
     beta = jnp.sqrt(gamma_minus_one * (2.0 + gamma_minus_one)) / (1.0 + gamma_minus_one)
@@ -82,23 +84,28 @@ def forward_shock_state(
     )
     solid_angle = jnp.where(expansion, expanded_solid_angle, base_solid_angle)
 
-    log10_radius_base = (
-        jnp.log10(3.0 - density_index)
-        + log10_electrons
-        - math.log10(_FOUR_PI)
-        - log10_density
-    ) / (3.0 - density_index)
-    radius_base = jnp.power(10.0, log10_radius_base)
-    relative_expansion = (
-        (1.0 - jnp.cos(latitude_step + angular_growth[0]))
-        / (1.0 - jnp.cos(latitude_step + angular_growth))
-    ) ** (0.5 / (3.0 - density_index))
-    radius_increment = jnp.diff(radius_base, prepend=0.0)
-    radius = jnp.cumsum(
-        jnp.where(expansion, radius_increment * relative_expansion, radius_increment)
-    )
-
-    log10_local_density = log10_density - density_index * jnp.log10(radius)
+    if radius_override is None:
+        log10_radius_base = (
+            jnp.log10(3.0 - density_index)
+            + log10_electrons
+            - math.log10(_FOUR_PI)
+            - log10_density
+        ) / (3.0 - density_index)
+        radius_base = jnp.power(10.0, log10_radius_base)
+        relative_expansion = (
+            (1.0 - jnp.cos(latitude_step + angular_growth[0]))
+            / (1.0 - jnp.cos(latitude_step + angular_growth))
+        ) ** (0.5 / (3.0 - density_index))
+        radius_increment = jnp.diff(radius_base, prepend=0.0)
+        radius = jnp.cumsum(
+            jnp.where(
+                expansion, radius_increment * relative_expansion, radius_increment
+            )
+        )
+        log10_local_density = log10_density - density_index * jnp.log10(radius)
+    else:
+        radius = radius_override
+        log10_local_density = log10_local_density_override
     shock_factor = (
         (adiabatic_index * gamma + 1.0) / (adiabatic_index - 1.0)
     ) * gamma_minus_one
