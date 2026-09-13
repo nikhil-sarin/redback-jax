@@ -39,6 +39,18 @@ Redback-JAX reimplements redback's analytical transient models in JAX, using log
 All bolometric functions return **`log10_lbol`** (log base-10 of luminosity in erg/s). 
 This is the natural unit for GPU inference — float32 can represent log10 values for any physically realistic luminosity.
 
+### Native Redback afterglows (return mJy or AB magnitude)
+
+The six non-refreshed native Redback jet structures are available as
+`tophat_redback`, `gaussian_redback`, `twocomponent_redback`,
+`powerlaw_redback`, `alternativepowerlaw_redback`, and
+`doublegaussian_redback`. Supply observer-frame `frequency` in Hz and choose
+`output_format="flux_density"` or `output_format="magnitude"`.
+
+Angular `res` and radial `steps` are static compilation settings. Their
+defaults are 50 and 250; reducing them is useful for exploratory inference,
+while convergence studies should increase both explicitly.
+
 ### Spectra pipeline
 
 `make_spectra_model(bolometric_fn)` wraps any bolometric model into a full SED pipeline:

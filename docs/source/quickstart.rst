@@ -137,6 +137,20 @@ Available models
 
 - ``tde_fallback_bolometric`` — Guillochon/MOSFiT fallback tables with viscous processing
 
+**Afterglows**
+
+- ``tophat_redback``
+- ``gaussian_redback``
+- ``twocomponent_redback``
+- ``powerlaw_redback``
+- ``alternativepowerlaw_redback``
+- ``doublegaussian_redback``
+
+  These native Redback models accept observer-frame ``frequency`` in Hz and
+  return mJy with ``output_format="flux_density"`` or AB magnitude with
+  ``output_format="magnitude"``. The ``res`` and ``steps`` arguments are
+  static JAX compilation settings.
+
 **Shock-powered**
 
 - ``shock_cooling_bolometric`` — Piro 2021
