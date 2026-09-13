@@ -146,6 +146,9 @@ Available models
 - ``alternativepowerlaw_redback``
 - ``doublegaussian_redback``
 
+  Append ``_refreshed`` to any of these names for the native refreshed-shell
+  variant, which additionally takes ``g1``, ``et``, and ``s1``.
+
   These native Redback models accept observer-frame ``frequency`` in Hz and
   return mJy with ``output_format="flux_density"`` or AB magnitude with
   ``output_format="magnitude"``. The ``res`` and ``steps`` arguments are

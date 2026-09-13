@@ -10,6 +10,7 @@ from redback_jax.afterglow import (
     forward_shock_state,
     jet_structure,
     legacy_impulsive_dynamics,
+    legacy_refreshed_dynamics,
     native_afterglow_flux_density,
     observer_angle,
     observer_state,
@@ -21,11 +22,17 @@ from redback_jax.constants import proton_mass
 from redback_jax.models import (
     MODEL_REGISTRY,
     alternativepowerlaw_redback,
+    alternativepowerlaw_redback_refreshed,
     doublegaussian_redback,
+    doublegaussian_redback_refreshed,
     gaussian_redback,
+    gaussian_redback_refreshed,
     powerlaw_redback,
+    powerlaw_redback_refreshed,
     tophat_redback,
+    tophat_redback_refreshed,
     twocomponent_redback,
+    twocomponent_redback_refreshed,
 )
 
 
@@ -129,6 +136,57 @@ def test_legacy_dynamics_matches_native_redback_fixture():
         adiabatic_index[:, indices], expected_adiabatic_index, rtol=2e-6
     )
     assert bool(jnp.all(gamma_minus_one > 0.0))
+
+
+def test_legacy_refreshed_dynamics_matches_native_redback_fixture():
+    gamma, _, log10_mass, adiabatic_index = legacy_refreshed_dynamics(
+        jnp.array([100.0]),
+        10.0,
+        jnp.array([52.0]),
+        jnp.array([np.log10(5e52)]),
+        3.0,
+        0.0,
+        steps=64,
+    )
+    indices = jnp.array([0, 16, 32, 48, 63])
+    expected_gamma = np.array(
+        [
+            [
+                100.0,
+                99.99999997347332,
+                29.200475226642375,
+                1.0000005418068327,
+                1.0000000000000018,
+            ]
+        ]
+    )
+    expected_log10_mass = np.array(
+        [
+            [
+                6.845486699678535,
+                17.345486699678535,
+                27.845486699678535,
+                38.34548669967854,
+                48.18923669967854,
+            ]
+        ]
+    )
+    expected_adiabatic_index = np.array(
+        [
+            [
+                1.3333679761466402,
+                1.3333679761466641,
+                1.3338853537078947,
+                1.666666054898741,
+                1.6666666666666645,
+            ]
+        ]
+    )
+    np.testing.assert_allclose(gamma[:, indices], expected_gamma, rtol=3e-5, atol=2e-6)
+    np.testing.assert_allclose(log10_mass[:, indices], expected_log10_mass, rtol=2e-6)
+    np.testing.assert_allclose(
+        adiabatic_index[:, indices], expected_adiabatic_index, rtol=3e-5
+    )
 
 
 def test_synchrotron_pipeline_matches_native_redback_fixture():
@@ -371,3 +429,46 @@ def test_composed_afterglow_has_finite_energy_gradient():
         ).sum()
 
     assert bool(jnp.isfinite(jax.grad(total_flux)(52.0)))
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_mjy", "extra"),
+    [
+        (tophat_redback_refreshed, [108.08590549, 120.30437189, 195.31447198], {}),
+        (gaussian_redback_refreshed, [105.22857326, 161.12478750, 234.11269432], {}),
+        (
+            twocomponent_redback_refreshed,
+            [105.67508074, 139.66274614, 284.61251216],
+            {"ss": 0.5},
+        ),
+        (powerlaw_redback_refreshed, [115.31731711, 190.76498019, 313.01541507], {}),
+        (
+            alternativepowerlaw_redback_refreshed,
+            [91.46102832, 119.78539057, 161.21755063],
+            {},
+        ),
+        (
+            doublegaussian_redback_refreshed,
+            [106.69755457, 167.38942391, 235.17995467],
+            {},
+        ),
+    ],
+)
+def test_refreshed_public_wrappers_match_native_redback(model, expected_mjy, extra):
+    common = (jnp.array([1.0, 10.0, 100.0]), 0.01, 0.05, 52.0)
+    tail = (0.0, 2.2, -1.0, -2.0, 100.0, 1.0)
+    if model is tophat_redback_refreshed:
+        args = common + (0.2, 2.0, 10.0, 3.0) + tail
+    else:
+        args = common + (0.2, 0.3, 2.0, 10.0, 3.0) + tail
+    result = model(
+        *args,
+        frequency=1.0e9,
+        output_format="flux_density",
+        expansion=False,
+        res=8,
+        steps=64,
+        **extra,
+    )
+    np.testing.assert_allclose(result, expected_mjy, rtol=0.04)
+    assert MODEL_REGISTRY[model.__name__] is model

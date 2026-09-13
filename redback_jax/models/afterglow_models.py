@@ -42,6 +42,10 @@ def _native_redback_wrapper(
     steps=250,
     cosmo_H0=PLANCK18_H0,
     cosmo_Om0=PLANCK18_OM0,
+    refreshed=False,
+    gamma_injection=2.0,
+    energy_factor=1.0,
+    injection_index=0.0,
 ):
     distance = (
         wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * MPC_TO_CM
@@ -69,6 +73,10 @@ def _native_redback_wrapper(
         expansion_index=a1,
         resolution=res,
         steps=steps,
+        refreshed=refreshed,
+        gamma_injection=gamma_injection,
+        energy_factor=energy_factor,
+        injection_index=injection_index,
     )
     return _format_afterglow_output(flux, output_format)
 
@@ -216,5 +224,253 @@ def doublegaussian_redback(
         structure_kind="double_gaussian",
         structure_energy=kwargs.pop("ss", 0.1),
         structure_gamma=kwargs.pop("aa", 0.5),
+        **kwargs,
+    )
+
+
+def _refreshed_kwargs(g1, et, s1):
+    return dict(
+        refreshed=True,
+        gamma_injection=g1,
+        energy_factor=et,
+        injection_index=s1,
+    )
+
+
+@citation_wrapper(_CITATION)
+def tophat_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thc,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="tophat",
+        structure_energy=0.01,
+        structure_gamma=0.5,
+        **_refreshed_kwargs(g1, et, s1),
+        **kwargs,
+    )
+
+
+@citation_wrapper(_CITATION)
+def gaussian_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    thj,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thj,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="gaussian",
+        structure_energy=0.01,
+        structure_gamma=0.5,
+        **_refreshed_kwargs(g1, et, s1),
+        **kwargs,
+    )
+
+
+@citation_wrapper(_CITATION)
+def twocomponent_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    thj,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thj,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="two_component",
+        structure_energy=kwargs.pop("ss", 0.01),
+        structure_gamma=kwargs.pop("aa", 4.0),
+        **_refreshed_kwargs(g1, et, s1),
+        **kwargs,
+    )
+
+
+@citation_wrapper(_CITATION)
+def powerlaw_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    thj,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thj,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="powerlaw",
+        structure_energy=kwargs.pop("ss", 3.0),
+        structure_gamma=kwargs.pop("aa", -3.0),
+        **_refreshed_kwargs(g1, et, s1),
+        **kwargs,
+    )
+
+
+@citation_wrapper(_CITATION)
+def alternativepowerlaw_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    thj,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thj,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="alternative_powerlaw",
+        structure_energy=kwargs.pop("ss", 3.0),
+        structure_gamma=kwargs.pop("aa", 3.0),
+        **_refreshed_kwargs(g1, et, s1),
+        **kwargs,
+    )
+
+
+@citation_wrapper(_CITATION)
+def doublegaussian_redback_refreshed(
+    time,
+    redshift,
+    thv,
+    loge0,
+    thc,
+    thj,
+    g1,
+    et,
+    s1,
+    logn0,
+    p,
+    logepse,
+    logepsb,
+    g0,
+    xiN,
+    **kwargs,
+):
+    return _native_redback_wrapper(
+        time,
+        redshift,
+        thv,
+        loge0,
+        thc,
+        thj,
+        logn0,
+        p,
+        logepse,
+        logepsb,
+        g0,
+        xiN,
+        structure_kind="double_gaussian",
+        structure_energy=kwargs.pop("ss", 0.1),
+        structure_gamma=kwargs.pop("aa", 0.5),
+        **_refreshed_kwargs(g1, et, s1),
         **kwargs,
     )

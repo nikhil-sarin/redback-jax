@@ -9,7 +9,7 @@ from jax.scipy.special import logsumexp
 
 from redback_jax.constants import day_to_s
 
-from .dynamics import legacy_impulsive_dynamics
+from .dynamics import legacy_impulsive_dynamics, legacy_refreshed_dynamics
 from .geometry import angular_mesh, observer_angle
 from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
 from .structure import jet_structure
@@ -40,7 +40,10 @@ def _log10_linear_interpolate(x, xp, log10_yp):
     )
 
 
-@partial(jit, static_argnames=("structure_kind", "resolution", "steps", "expansion"))
+@partial(
+    jit,
+    static_argnames=("structure_kind", "resolution", "steps", "expansion", "refreshed"),
+)
 def native_afterglow_flux_density(
     time,
     frequency,
@@ -64,6 +67,10 @@ def native_afterglow_flux_density(
     expansion_index=1.0,
     resolution=50,
     steps=250,
+    refreshed=False,
+    gamma_injection=2.0,
+    energy_factor=1.0,
+    injection_index=0.0,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -87,13 +94,28 @@ def native_afterglow_flux_density(
     legacy_log10_density = jnp.where(
         density_index == 2.0, log10_density + math.log10(3.0e35), log10_density
     )
-    gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
-        gamma_ring,
-        ring_log10_energy,
-        legacy_log10_density,
-        density_index=density_index,
-        steps=steps,
-    )
+    if refreshed:
+        ring_log10_energy_maximum = (
+            jnp.log10(energy_factor) + log10_energy + 2.0 * jnp.log10(energy_fraction)
+        )
+        gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_refreshed_dynamics(
+            gamma_ring,
+            gamma_injection,
+            ring_log10_energy,
+            ring_log10_energy_maximum,
+            injection_index,
+            legacy_log10_density,
+            density_index=density_index,
+            steps=steps,
+        )
+    else:
+        gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
+            gamma_ring,
+            ring_log10_energy,
+            legacy_log10_density,
+            density_index=density_index,
+            steps=steps,
+        )
 
     spectral_peak = jnp.interp(electron_index, _P_GRID, _SPECTRAL_PEAK)
     peak_flux_factor = jnp.interp(electron_index, _P_GRID, _PEAK_FLUX)
