@@ -135,6 +135,8 @@ Available models
   Note: parameter is ``log10_l0`` (not ``l0``), because the linear value
   (~10⁴³ erg/s) overflows float32.
 
+- ``tde_fallback_bolometric`` — Guillochon/MOSFiT fallback tables with viscous processing
+
 **Shock-powered**
 
 - ``shock_cooling_bolometric`` — Piro 2021

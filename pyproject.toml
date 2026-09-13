@@ -85,7 +85,7 @@ where = ["."]
 include = ["redback_jax*"]
 
 [tool.setuptools.package-data]
-redback_jax = ["priors/*", "tables/*"]
+redback_jax = ["priors/*", "tables/*", "tables/**/*"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"

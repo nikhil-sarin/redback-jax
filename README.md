@@ -29,6 +29,7 @@ Redback-JAX reimplements redback's analytical transient models in JAX, using log
 | `magnetar_powered_bolometric` | Dipole spin-down + Arnett diffusion | Nicholl+ 2017 |
 | `csm_interaction_bolometric` | Forward/reverse shocks + CSM diffusion | Chatzopoulos+ 2013 |
 | `tde_analytical_bolometric` | t⁻⁵/³ fallback + Arnett diffusion | — |
+| `tde_fallback_bolometric` | Guillochon fallback tables + viscous processing | Guillochon+ 2013, Mockler+ 2019 |
 | `shock_cooling_bolometric` | Shock-cooling envelope (n=10) | Piro 2021 |
 | `shocked_cocoon_bolometric` | Shocked jet cocoon | Piro & Kollmeier 2018 |
 | `metzger_kilonova_bolometric` | r-process ODE, 200 shells | Metzger 2017 |
@@ -271,4 +272,4 @@ If you do any sampling, please cite the relevant sampling papers.
 ## Redback-JAX paper
 
 A paper describing the Redback-JAX package is in preparation. 
-Redback-JAX is still very much in development and the API/etc may not be stable. 
+Redback-JAX is still very much in development and the API/etc may not be stable.
