@@ -22,10 +22,24 @@ def angular_mesh(theta_jet, resolution=50):
 
 
 @jit
-def observer_angle(phi, theta, theta_observer):
+def angular_patch_coordinates(theta, phi):
+    """Expand one-dimensional polar and azimuthal grids into flat patches."""
+    return jnp.repeat(theta, phi.size), jnp.tile(phi, theta.size)
+
+
+@jit
+def observer_angle(phi, theta, theta_observer, phi_observer=0.0):
     """Return the angle between each angular cell and the line of sight."""
-    cosine = (
-        jnp.cos(theta_observer) * jnp.cos(theta)[:, None]
-        + jnp.sin(theta_observer) * jnp.sin(theta)[:, None] * jnp.cos(phi)[None, :]
-    )
+    cosine = jnp.cos(theta_observer) * jnp.cos(theta)[:, None] + jnp.sin(
+        theta_observer
+    ) * jnp.sin(theta)[:, None] * jnp.cos(phi[None, :] - phi_observer)
     return jnp.arccos(jnp.clip(cosine, -1.0, 1.0)).reshape(-1)
+
+
+@jit
+def observer_angle_patches(phi, theta, theta_observer, phi_observer=0.0):
+    """Return viewing angles for already flattened angular patches."""
+    cosine = jnp.cos(theta_observer) * jnp.cos(theta) + jnp.sin(
+        theta_observer
+    ) * jnp.sin(theta) * jnp.cos(phi - phi_observer)
+    return jnp.arccos(jnp.clip(cosine, -1.0, 1.0))

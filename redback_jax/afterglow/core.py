@@ -15,7 +15,12 @@ from .dynamics import (
     legacy_refreshed_dynamics,
     powered_thin_shell_dynamics,
 )
-from .geometry import angular_mesh, observer_angle
+from .geometry import (
+    angular_mesh,
+    angular_patch_coordinates,
+    observer_angle,
+    observer_angle_patches,
+)
 from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
 from .structure import jet_structure
 
@@ -61,6 +66,8 @@ def _log10_linear_interpolate(x, xp, log10_yp):
         "refreshed",
         "density_function",
         "engine_function",
+        "structure_function",
+        "radiation_function",
     ),
 )
 def native_afterglow_flux_density(
@@ -96,6 +103,11 @@ def native_afterglow_flux_density(
     engine_function=None,
     engine_parameters=None,
     gamma_engine=1000.0,
+    structure_function=None,
+    structure_parameters=None,
+    radiation_function=None,
+    radiation_parameters=None,
+    phi_observer=0.0,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -104,18 +116,37 @@ def native_afterglow_flux_density(
     """
     time = jnp.atleast_1d(time)
     frequency = jnp.broadcast_to(frequency, time.shape)
-    solid_angle, theta, phi = angular_mesh(theta_jet, resolution=resolution)
-    gamma_ring, energy_fraction = jet_structure(
-        theta,
-        gamma_initial,
-        1.0,
-        theta_core,
-        theta_jet,
-        structure_kind,
-        structure_energy,
-        structure_gamma,
-    )
-    ring_log10_energy = log10_energy + jnp.log10(energy_fraction)
+    solid_angle, theta_grid, phi_grid = angular_mesh(theta_jet, resolution=resolution)
+    if structure_function is None:
+        gamma_element, energy_fraction = jet_structure(
+            theta_grid,
+            gamma_initial,
+            1.0,
+            theta_core,
+            theta_jet,
+            structure_kind,
+            structure_energy,
+            structure_gamma,
+        )
+        element_theta = theta_grid
+        patch_theta = None
+        patch_phi = None
+    else:
+        patch_theta, patch_phi = angular_patch_coordinates(theta_grid, phi_grid)
+        gamma_element, energy_fraction = structure_function(
+            patch_theta,
+            patch_phi,
+            gamma_initial,
+            theta_core,
+            theta_jet,
+            structure_parameters,
+        )
+        element_theta = patch_theta
+    gamma_element = jnp.broadcast_to(gamma_element, element_theta.shape)
+    energy_fraction = jnp.broadcast_to(energy_fraction, element_theta.shape)
+    floating_dtype = jnp.result_type(time, 1.0)
+    energy_fraction = jnp.maximum(energy_fraction, jnp.finfo(floating_dtype).tiny)
+    element_log10_energy = log10_energy + jnp.log10(energy_fraction)
     legacy_log10_density = jnp.where(
         density_index == 2.0, log10_density + math.log10(3.0e35), log10_density
     )
@@ -161,8 +192,8 @@ def native_afterglow_flux_density(
             _,
             _,
         ) = powered_thin_shell_dynamics(
-            gamma_ring,
-            ring_log10_energy,
+            gamma_element,
+            element_log10_energy,
             active_density_parameters,
             initial_mass,
             active_density_function,
@@ -197,22 +228,22 @@ def native_afterglow_flux_density(
             radius_override,
             local_density_override,
         ) = arbitrary_csm_impulsive_dynamics(
-            gamma_ring,
-            ring_log10_energy,
+            gamma_element,
+            element_log10_energy,
             density_parameters,
             initial_mass,
             density_function,
             steps=steps,
         )
     elif refreshed:
-        ring_log10_energy_maximum = (
+        element_log10_energy_maximum = (
             jnp.log10(energy_factor) + log10_energy + 2.0 * jnp.log10(energy_fraction)
         )
         gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_refreshed_dynamics(
-            gamma_ring,
+            gamma_element,
             gamma_injection,
-            ring_log10_energy,
-            ring_log10_energy_maximum,
+            element_log10_energy,
+            element_log10_energy_maximum,
             injection_index,
             legacy_log10_density,
             density_index=density_index,
@@ -220,8 +251,8 @@ def native_afterglow_flux_density(
         )
     else:
         gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
-            gamma_ring,
-            ring_log10_energy,
+            gamma_element,
+            element_log10_energy,
             legacy_log10_density,
             density_index=density_index,
             steps=steps,
@@ -254,13 +285,22 @@ def native_afterglow_flux_density(
             radius_override,
             local_density_override,
         )
-    )(gamma, gamma_minus_one, log10_mass, theta, adiabatic_index)
+    )(gamma, gamma_minus_one, log10_mass, element_theta, adiabatic_index)
 
-    patch_shocks = tree_util.tree_map(
-        lambda value: jnp.repeat(value, resolution, axis=0), shocks
-    )
-    patch_gamma = jnp.repeat(gamma, resolution, axis=0)
-    patch_angles = observer_angle(phi, theta, theta_observer)
+    if structure_function is None:
+        patch_shocks = tree_util.tree_map(
+            lambda value: jnp.repeat(value, resolution, axis=0), shocks
+        )
+        patch_gamma = jnp.repeat(gamma, resolution, axis=0)
+        patch_angles = observer_angle(
+            phi_grid, theta_grid, theta_observer, phi_observer
+        )
+    else:
+        patch_shocks = shocks
+        patch_gamma = gamma
+        patch_angles = observer_angle_patches(
+            patch_phi, patch_theta, theta_observer, phi_observer
+        )
     observers = vmap(observer_state, in_axes=(None, 0, None, 0, 0, 0))(
         log10_luminosity_distance,
         solid_angle,
@@ -272,11 +312,21 @@ def native_afterglow_flux_density(
 
     def one_observation(observer_time_days, observer_frequency):
         source_frequency = observer_frequency * (1.0 + redshift)
-        patch_log_flux = vmap(
-            lambda state: synchrotron_log_flux(
-                state, jnp.log10(source_frequency), electron_index
-            )
-        )(observers)
+        if radiation_function is None:
+            patch_log_flux = vmap(
+                lambda state: synchrotron_log_flux(
+                    state, jnp.log10(source_frequency), electron_index
+                )
+            )(observers)
+        else:
+            patch_log_flux = vmap(
+                lambda state: radiation_function(
+                    state,
+                    jnp.log10(source_frequency),
+                    electron_index,
+                    radiation_parameters,
+                )
+            )(observers)
         source_time = observer_time_days * day_to_s / (1.0 + redshift)
         interpolated = vmap(
             lambda times, flux: _log10_linear_interpolate(source_time, times, flux)
