@@ -31,10 +31,15 @@ from .radiation import (
     observer_state,
     optically_thin_radiation_prescription,
     optically_thin_synchrotron_log_flux,
+    reverse_observer_state,
+    reverse_shock_state,
+    reverse_observer_state,
+    reverse_shock_state,
     smooth_synchrotron_log_flux,
     smooth_synchrotron_radiation_prescription,
     synchrotron_log_flux,
 )
+from .reverse_shock import ReverseShockDynamics, unmagnetized_reverse_shock_dynamics
 from .structure import jet_structure
 
 __all__ = [
@@ -55,8 +60,13 @@ __all__ = [
     "optically_thin_synchrotron_log_flux",
     "power_law_density",
     "power_law_log_density",
+    "ReverseShockDynamics",
     "smoothly_broken_power_law_log_density",
     "powered_thin_shell_dynamics",
+    "reverse_observer_state",
+    "reverse_shock_state",
+    "reverse_observer_state",
+    "reverse_shock_state",
     "swept_mass_derivative",
     "forward_shock_state",
     "smooth_synchrotron_log_flux",
@@ -64,4 +74,5 @@ __all__ = [
     "synchrotron_log_flux",
     "tabulated_engine_cumulative_log10",
     "tabulated_log_density",
+    "unmagnetized_reverse_shock_dynamics",
 ]

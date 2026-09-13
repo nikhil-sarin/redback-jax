@@ -24,6 +24,7 @@ from redback_jax.afterglow import (
     power_law_density,
     power_law_log_density,
     powered_thin_shell_dynamics,
+    unmagnetized_reverse_shock_dynamics,
     smoothly_broken_power_law_log_density,
     smooth_synchrotron_radiation_prescription,
     swept_mass_derivative,
@@ -216,6 +217,99 @@ def test_pluggable_radiation_prescriptions_are_finite_and_differentiable():
     ).sum()
     assert bool(jnp.isfinite(smooth_flux(8.0)))
     assert bool(jnp.isfinite(jax.grad(smooth_flux)(8.0)))
+
+
+def test_reverse_shock_dynamics_are_finite_converged_and_cross_the_shell():
+    initial_mass = np.log10(4.0 * np.pi / 3.0) + 30.0 + np.log10(proton_mass)
+    common = dict(
+        gamma_initial=jnp.array([100.0], dtype=jnp.float32),
+        log10_energy=jnp.array([52.0], dtype=jnp.float32),
+        engine_duration=jnp.array([100.0], dtype=jnp.float32),
+        density_parameters=(0.0, 10.0, 0.0),
+        log10_swept_mass_initial=jnp.asarray(initial_mass, dtype=jnp.float32),
+        density_function=_power_law_profile,
+    )
+    solution = unmagnetized_reverse_shock_dynamics(**common, steps=512)
+    assert all(bool(jnp.all(jnp.isfinite(value))) for value in solution)
+    assert bool(jnp.all(jnp.diff(solution.observer_time[0]) > 0.0))
+    assert bool(jnp.all(jnp.diff(solution.log10_forward_mass[0]) > 0.0))
+    assert solution.crossing_fraction[0, -1] > 0.999
+
+    refined = unmagnetized_reverse_shock_dynamics(**common, steps=1024)
+    np.testing.assert_allclose(
+        solution.bulk_gamma[0, 256], refined.bulk_gamma[0, 512], rtol=2.0e-4
+    )
+    np.testing.assert_allclose(
+        solution.crossing_fraction[0, 256],
+        refined.crossing_fraction[0, 512],
+        rtol=2.0e-4,
+    )
+
+
+def test_longer_engine_delays_reverse_shock_crossing():
+    initial_mass = np.log10(4.0 * np.pi / 3.0) + 30.0 + np.log10(proton_mass)
+
+    def crossing_time(duration):
+        solution = unmagnetized_reverse_shock_dynamics(
+            jnp.array([100.0]),
+            jnp.array([52.0]),
+            jnp.array([duration]),
+            (0.0, 10.0, 0.0),
+            initial_mass,
+            _power_law_profile,
+            steps=512,
+        )
+        index = jnp.argmax(solution.crossing_fraction[0] > 0.999)
+        return solution.observer_time[0, index]
+
+    assert crossing_time(1000.0) > crossing_time(10.0)
+
+
+def test_reverse_shock_lightcurve_has_independent_microphysics_gradient():
+    common = _flexible_lightcurve_kwargs()
+    common.update(
+        time=jnp.array([0.001, 0.01, 0.1]),
+        frequency=1.0e14,
+        structure_kind="tophat",
+        theta_core=0.2,
+        theta_jet=0.2,
+        theta_observer=0.05,
+        resolution=4,
+        steps=256,
+    )
+
+    def total_flux(reverse_log10_epsilon_e):
+        return native_afterglow_flux_density(
+            **common,
+            reverse_shock=True,
+            engine_duration=100.0,
+            reverse_log10_epsilon_e=reverse_log10_epsilon_e,
+            reverse_log10_epsilon_b=-2.0,
+            reverse_radiation_function=optically_thin_radiation_prescription,
+            reverse_radiation_parameters=(),
+        ).sum()
+
+    gradient = jax.grad(total_flux)(-1.0)
+    assert bool(jnp.isfinite(total_flux(-1.0)))
+    assert bool(jnp.isfinite(gradient))
+    assert abs(float(gradient)) > 0.0
+
+
+def test_reverse_shock_composes_with_arbitrary_structure_and_csm():
+    common = _flexible_lightcurve_kwargs()
+    common.update(time=jnp.array([0.01, 0.1]), resolution=3, steps=128)
+    flux = native_afterglow_flux_density(
+        **common,
+        structure_function=_azimuthal_gaussian_structure,
+        structure_parameters=(0.4, 0.2),
+        density_function=_broken_profile,
+        density_parameters=(2.0, 17.0, 0.5, 2.0, 5.0),
+        reverse_shock=True,
+        engine_duration=100.0,
+    )
+    assert flux.shape == (2,)
+    assert bool(jnp.all(jnp.isfinite(flux)))
+    assert bool(jnp.all(flux > 0.0))
 
 
 def test_general_power_law_medium_and_swept_mass():

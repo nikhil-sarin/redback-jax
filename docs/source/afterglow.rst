@@ -75,6 +75,47 @@ The optically thin option matches the assumption made by De Colle &
 Ramirez-Ruiz (2026); it should not be used for early radio data where
 self-absorption is important.
 
+Finite-width reverse shocks
+---------------------------
+
+Set ``reverse_shock=True`` and supply ``engine_duration`` in source-frame
+seconds to replace the impulsive dynamics with a coupled four-region,
+finite-width forward/reverse-shock calculation. The implementation follows the
+unmagnetized mechanical model used by VegasAfterglow. It evolves shell
+injection, reverse-shock crossing, and adiabatic post-crossing expansion on the
+same fixed log-radius grid used for observer integration.
+
+.. code-block:: python
+
+   flux_mjy = gaussian_redback(
+       # Standard arguments omitted here for clarity.
+       ...,
+       reverse_shock=True,
+       engine_duration=100.0,
+       reverse_electron_index=2.15,
+       reverse_log10_epsilon_e=-1.2,
+       reverse_log10_epsilon_b=-2.5,
+       reverse_accelerated_fraction=1.0,
+   )
+
+Omitted reverse-shock microphysics default to the corresponding forward-shock
+values. ``reverse_radiation_function`` and
+``reverse_radiation_parameters`` provide the same per-patch spectral-callable
+interface as their forward-shock counterparts. Forward and reverse emission
+are transformed separately and summed in flux space.
+
+The solver uses dimensionless mass, rest-energy, and shell-width variables, so
+it is stable under JAX's default float32 configuration and remains
+differentiable with respect to physical parameters. It composes with built-in
+or arbitrary two-dimensional jet structures and with built-in or arbitrary
+radial CSM profiles. It cannot currently be combined with ``refreshed=True``
+or ``engine_function`` because those select different dynamics backends.
+
+This first implementation is deliberately unmagnetized and synchrotron-only.
+Ordered upstream fields, SSC/Klein--Nishina corrections, and direct numerical
+validation against VegasAfterglow are follow-up validation layers rather than
+implicit approximations in this interface.
+
 Arbitrary radial CSM profiles
 -----------------------------
 
