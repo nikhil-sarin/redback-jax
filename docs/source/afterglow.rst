@@ -6,6 +6,75 @@ structure, blast-wave dynamics, synchrotron radiation, and observer-time
 integration. The public wrappers preserve Redback's parameter names and return
 flux density in mJy or AB magnitude.
 
+Arbitrary jet structures
+------------------------
+
+Every ``_redback`` wrapper accepts ``structure_function`` and a differentiable
+``structure_parameters`` PyTree. The static callable has the contract
+
+``structure_function(theta, phi, gamma_core, theta_core, theta_jet, parameters)``
+
+and returns ``(gamma_initial, energy_fraction)`` on the supplied flattened
+angular patches. ``energy_fraction`` multiplies the isotropic-equivalent core
+energy. This supports axisymmetric and fully azimuth-dependent jets. For the
+latter, ``phi_observer`` sets the observer azimuth in radians.
+
+.. code-block:: python
+
+   import jax.numpy as jnp
+
+
+   def lopsided_gaussian(theta, phi, gamma_core, theta_core, theta_jet, pars):
+       del theta_jet
+       asymmetry, phi_peak = pars
+       radial = jnp.exp(-0.5 * (theta / theta_core) ** 2)
+       energy = radial * (1.0 + asymmetry * jnp.cos(phi - phi_peak))
+       gamma = 1.0 + (gamma_core - 1.0) * radial
+       return gamma, energy
+
+
+   flux_mjy = gaussian_redback(
+       # Standard arguments omitted here for clarity.
+       ...,
+       structure_function=lopsided_gaussian,
+       structure_parameters=(0.5, 0.0),
+       phi_observer=0.3,
+   )
+
+Returned Lorentz factors must be at least one and energy fractions must be
+non-negative. Built-in structures retain the faster polar-ring path; a general
+two-dimensional structure evolves all ``res**2`` patches independently.
+
+Radiation prescriptions
+-----------------------
+
+``radiation_function`` replaces the final per-patch spectrum without changing
+the dynamics or equal-arrival-time integration. Its contract is
+
+``radiation_function(observer_state, log10_frequency, electron_index, parameters)``
+
+and it returns log10 flux density in CGS units along the radial history.
+``radiation_parameters`` remains dynamic and differentiable. The supplied
+adapters are ``legacy_radiation_prescription`` (the exact native Redback sharp
+spectrum with self-absorption), ``optically_thin_radiation_prescription``, and
+``smooth_synchrotron_radiation_prescription``. The smooth prescription takes a
+one-element tuple containing the break sharpness.
+
+.. code-block:: python
+
+   from redback_jax.afterglow import optically_thin_radiation_prescription
+
+   flux_mjy = gaussian_redback(
+       # Standard arguments omitted here for clarity.
+       ...,
+       radiation_function=optically_thin_radiation_prescription,
+       radiation_parameters=(),
+   )
+
+The optically thin option matches the assumption made by De Colle &
+Ramirez-Ruiz (2026); it should not be used for early radio data where
+self-absorption is important.
+
 Arbitrary radial CSM profiles
 -----------------------------
 

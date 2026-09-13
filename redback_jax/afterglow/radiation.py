@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 from jax import jit, lax
+from jax.scipy.special import logsumexp
 
 from redback_jax.constants import (
     electron_mass,
@@ -237,9 +238,7 @@ def observer_state(
     )
 
 
-@jit
-def synchrotron_log_flux(observer, log10_frequency, electron_index):
-    """Return log10 flux density including native Redback self-absorption."""
+def _synchrotron_branches(observer, log10_frequency, electron_index):
     log_nuc = observer.log10_nu_cooling
     log_num = observer.log10_nu_minimum
     fast = log_nuc < log_num
@@ -259,6 +258,19 @@ def synchrotron_log_flux(observer, log10_frequency, electron_index):
         - 0.5 * (electron_index - 1.0) * (log_nuc - log_num)
         - 0.5 * electron_index * (log10_frequency - log_nuc)
     )
+    return fast, (fast_low, fast_mid, fast_high), (slow_low, slow_mid, slow_high)
+
+
+@jit
+def optically_thin_synchrotron_log_flux(observer, log10_frequency, electron_index):
+    """Return the native sharp synchrotron spectrum without self-absorption."""
+    fast, fast_branches, slow_branches = _synchrotron_branches(
+        observer, log10_frequency, electron_index
+    )
+    fast_low, fast_mid, fast_high = fast_branches
+    slow_low, slow_mid, slow_high = slow_branches
+    log_nuc = observer.log10_nu_cooling
+    log_num = observer.log10_nu_minimum
     fast_flux = jnp.where(
         log10_frequency < log_nuc,
         fast_low,
@@ -269,9 +281,78 @@ def synchrotron_log_flux(observer, log10_frequency, electron_index):
         slow_low,
         jnp.where(log10_frequency < log_nuc, slow_mid, slow_high),
     )
+    return jnp.where(fast, fast_flux, slow_flux)
+
+
+@jit
+def synchrotron_log_flux(observer, log10_frequency, electron_index):
+    """Return log10 flux density including native Redback self-absorption."""
+    thin_flux = optically_thin_synchrotron_log_flux(
+        observer, log10_frequency, electron_index
+    )
+    log_num = observer.log10_nu_minimum
     optically_thick = (
         observer.log10_blackbody_factor
         + 2.0 * log10_frequency
         + jnp.maximum(0.0, 0.5 * (log10_frequency - log_num))
     )
-    return jnp.minimum(jnp.where(fast, fast_flux, slow_flux), optically_thick)
+    return jnp.minimum(thin_flux, optically_thick)
+
+
+def _smooth_minimum_log10(values, smoothness):
+    scale = -smoothness * math.log(10.0)
+    return logsumexp(scale * jnp.stack(values), axis=0) / scale
+
+
+@jit
+def smooth_synchrotron_log_flux(observer, log10_frequency, electron_index, smoothness):
+    """Return a differentiably joined synchrotron spectrum with absorption.
+
+    ``smoothness`` controls all spectral joins. Values around 5--20 approach
+    the native sharp broken power law, while smaller values produce broader
+    transitions. This is a generic smooth-envelope prescription rather than a
+    calibrated Granot--Sari spectrum.
+    """
+    fast, fast_branches, slow_branches = _synchrotron_branches(
+        observer, log10_frequency, electron_index
+    )
+    fast_flux = _smooth_minimum_log10(fast_branches, smoothness)
+    slow_flux = _smooth_minimum_log10(slow_branches, smoothness)
+    thin_flux = jnp.where(fast, fast_flux, slow_flux)
+    optically_thick = (
+        observer.log10_blackbody_factor
+        + 2.0 * log10_frequency
+        + jnp.maximum(0.0, 0.5 * (log10_frequency - observer.log10_nu_minimum))
+    )
+    return _smooth_minimum_log10((thin_flux, optically_thick), smoothness)
+
+
+@jit
+def legacy_radiation_prescription(
+    observer, log10_frequency, electron_index, parameters
+):
+    """Callable adapter for the exact native Redback radiation prescription."""
+    del parameters
+    return synchrotron_log_flux(observer, log10_frequency, electron_index)
+
+
+@jit
+def optically_thin_radiation_prescription(
+    observer, log10_frequency, electron_index, parameters
+):
+    """Callable adapter for synchrotron emission without self-absorption."""
+    del parameters
+    return optically_thin_synchrotron_log_flux(
+        observer, log10_frequency, electron_index
+    )
+
+
+@jit
+def smooth_synchrotron_radiation_prescription(
+    observer, log10_frequency, electron_index, parameters
+):
+    """Callable adapter for smooth synchrotron; parameters are ``(s,)``."""
+    (smoothness,) = parameters
+    return smooth_synchrotron_log_flux(
+        observer, log10_frequency, electron_index, smoothness
+    )

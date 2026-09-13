@@ -7,20 +7,25 @@ import pytest
 
 from redback_jax.afterglow import (
     angular_mesh,
+    angular_patch_coordinates,
     arbitrary_csm_impulsive_dynamics,
     constant_engine_cumulative_log10,
     fallback_engine_cumulative_log10,
     forward_shock_state,
     jet_structure,
     legacy_impulsive_dynamics,
+    legacy_radiation_prescription,
     legacy_refreshed_dynamics,
     native_afterglow_flux_density,
     observer_angle,
+    observer_angle_patches,
     observer_state,
+    optically_thin_radiation_prescription,
     power_law_density,
     power_law_log_density,
     powered_thin_shell_dynamics,
     smoothly_broken_power_law_log_density,
+    smooth_synchrotron_radiation_prescription,
     swept_mass_derivative,
     synchrotron_log_flux,
     tabulated_engine_cumulative_log10,
@@ -53,6 +58,48 @@ def _no_engine(time_seconds, parameters):
     return jnp.full_like(time_seconds, -jnp.inf)
 
 
+def _custom_gaussian_structure(
+    theta, phi, gamma_core, theta_core, theta_jet, parameters
+):
+    del phi, theta_jet, parameters
+    factor = jnp.exp(-0.5 * (theta / theta_core) ** 2)
+    return (gamma_core - 1.0) * factor + 1.0 + 1.0e-12, factor
+
+
+def _azimuthal_gaussian_structure(
+    theta, phi, gamma_core, theta_core, theta_jet, parameters
+):
+    del theta_jet
+    asymmetry, phi_peak = parameters
+    radial = jnp.exp(-0.5 * (theta / theta_core) ** 2)
+    energy = radial * (1.0 + asymmetry * jnp.cos(phi - phi_peak))
+    gamma = (gamma_core - 1.0) * radial + 1.0 + 1.0e-12
+    return gamma, energy
+
+
+def _flexible_lightcurve_kwargs():
+    return dict(
+        time=jnp.array([1.0, 10.0, 100.0]),
+        frequency=3.0e9,
+        redshift=0.01,
+        theta_observer=0.18,
+        log10_energy=52.0,
+        theta_core=0.1,
+        theta_jet=0.4,
+        log10_density=0.0,
+        electron_index=2.2,
+        log10_epsilon_e=-1.0,
+        log10_epsilon_b=-2.0,
+        gamma_initial=100.0,
+        accelerated_fraction=1.0,
+        log10_luminosity_distance=jnp.log10(1.3776657447116507e26),
+        structure_kind="gaussian",
+        expansion=False,
+        resolution=6,
+        steps=96,
+    )
+
+
 def test_angular_mesh_has_expected_size_and_solid_angle():
     solid_angle, theta, phi = angular_mesh(0.4, resolution=16)
     assert solid_angle.shape == (16**2,)
@@ -68,6 +115,14 @@ def test_observer_angle_on_axis_repeats_latitudes():
     np.testing.assert_allclose(
         angles, np.repeat(np.asarray(theta)[:, None], 8, axis=1), atol=2e-6
     )
+
+
+def test_flat_angular_patch_geometry_matches_tensor_mesh():
+    _, theta, phi = angular_mesh(0.4, resolution=8)
+    patch_theta, patch_phi = angular_patch_coordinates(theta, phi)
+    tensor_angles = observer_angle(phi, theta, 0.2, 0.7)
+    flat_angles = observer_angle_patches(patch_phi, patch_theta, 0.2, 0.7)
+    np.testing.assert_allclose(flat_angles, tensor_angles)
 
 
 def test_all_native_structures_are_finite():
@@ -96,6 +151,71 @@ def test_all_native_structures_are_finite():
         assert bool(jnp.all(jnp.isfinite(energy)))
         assert bool(jnp.all(gamma >= 1.0))
         assert bool(jnp.all(energy >= 0.0))
+
+
+def test_arbitrary_structure_recovers_builtin_gaussian():
+    common = _flexible_lightcurve_kwargs()
+    builtin = native_afterglow_flux_density(**common)
+    custom = native_afterglow_flux_density(
+        **common,
+        structure_function=_custom_gaussian_structure,
+        structure_parameters=(),
+    )
+    np.testing.assert_allclose(custom, builtin, rtol=2e-10, atol=0.0)
+
+
+def test_non_axisymmetric_structure_responds_to_observer_azimuth():
+    common = _flexible_lightcurve_kwargs()
+    parameters = (0.8, 0.0)
+    aligned = native_afterglow_flux_density(
+        **common,
+        structure_function=_azimuthal_gaussian_structure,
+        structure_parameters=parameters,
+        phi_observer=0.0,
+    )
+    opposite = native_afterglow_flux_density(
+        **common,
+        structure_function=_azimuthal_gaussian_structure,
+        structure_parameters=parameters,
+        phi_observer=jnp.pi,
+    )
+    assert float(aligned.sum()) > float(opposite.sum())
+
+    gradient = jax.grad(
+        lambda asymmetry: native_afterglow_flux_density(
+            **common,
+            structure_function=_azimuthal_gaussian_structure,
+            structure_parameters=(asymmetry, 0.0),
+            phi_observer=0.3,
+        ).sum()
+    )(0.4)
+    assert bool(jnp.isfinite(gradient))
+
+
+def test_pluggable_radiation_prescriptions_are_finite_and_differentiable():
+    common = _flexible_lightcurve_kwargs()
+    native = native_afterglow_flux_density(**common)
+    adapted = native_afterglow_flux_density(
+        **common,
+        radiation_function=legacy_radiation_prescription,
+        radiation_parameters=(),
+    )
+    np.testing.assert_allclose(adapted, native, rtol=0.0, atol=0.0)
+
+    optically_thin = native_afterglow_flux_density(
+        **common,
+        radiation_function=optically_thin_radiation_prescription,
+        radiation_parameters=(),
+    )
+    assert bool(jnp.all(optically_thin >= native))
+
+    smooth_flux = lambda smoothness: native_afterglow_flux_density(
+        **common,
+        radiation_function=smooth_synchrotron_radiation_prescription,
+        radiation_parameters=(smoothness,),
+    ).sum()
+    assert bool(jnp.isfinite(smooth_flux(8.0)))
+    assert bool(jnp.isfinite(jax.grad(smooth_flux)(8.0)))
 
 
 def test_general_power_law_medium_and_swept_mass():
