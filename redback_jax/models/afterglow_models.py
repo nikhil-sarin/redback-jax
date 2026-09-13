@@ -57,6 +57,14 @@ def _native_redback_wrapper(
     radiation_function=None,
     radiation_parameters=None,
     phi_observer=0.0,
+    reverse_shock=False,
+    engine_duration=100.0,
+    reverse_electron_index=None,
+    reverse_log10_epsilon_e=None,
+    reverse_log10_epsilon_b=None,
+    reverse_accelerated_fraction=None,
+    reverse_radiation_function=None,
+    reverse_radiation_parameters=None,
 ):
     distance = (
         wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * MPC_TO_CM
@@ -99,6 +107,14 @@ def _native_redback_wrapper(
         radiation_function=radiation_function,
         radiation_parameters=radiation_parameters,
         phi_observer=phi_observer,
+        reverse_shock=reverse_shock,
+        engine_duration=engine_duration,
+        reverse_electron_index=reverse_electron_index,
+        reverse_log10_epsilon_e=reverse_log10_epsilon_e,
+        reverse_log10_epsilon_b=reverse_log10_epsilon_b,
+        reverse_accelerated_fraction=reverse_accelerated_fraction,
+        reverse_radiation_function=reverse_radiation_function,
+        reverse_radiation_parameters=reverse_radiation_parameters,
     )
     return _format_afterglow_output(flux, output_format)
 

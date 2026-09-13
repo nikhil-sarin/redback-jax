@@ -17,6 +17,7 @@ from redback_jax.constants import (
 )
 
 _FOUR_PI = 4.0 * math.pi
+_LOG10_C2 = 2.0 * math.log10(speed_of_light)
 
 
 class ShockState(NamedTuple):
@@ -178,6 +179,121 @@ def forward_shock_state(
     )
 
 
+@partial(jit, static_argnames=("resolution",))
+def reverse_shock_state(
+    bulk_gamma,
+    relative_gamma,
+    log10_reverse_mass,
+    log10_ejecta_mass,
+    log10_reverse_internal_energy,
+    log10_unshocked_width,
+    radius,
+    theta,
+    electron_index,
+    spectral_peak,
+    peak_flux_factor,
+    epsilon_b,
+    epsilon_e,
+    azimuth_step,
+    latitude_step,
+    accelerated_fraction=1.0,
+    resolution=50,
+):
+    """Calculate synchrotron state for an unmagnetized reverse shock.
+
+    The upstream shell density and downstream thermal Lorentz factor are
+    reconstructed from the finite-width dynamics. Reverse-shock microphysics
+    are independent of the forward-shock values.
+    """
+    del resolution
+    beta = _four_velocity_for_radiation(bulk_gamma) / bulk_gamma
+    log10_electrons = log10_reverse_mass - math.log10(proton_mass)
+    log10_radius = jnp.log10(radius)
+    log10_upstream_density = (
+        log10_ejecta_mass
+        - math.log10(_FOUR_PI)
+        - 2.0 * log10_radius
+        - log10_unshocked_width
+    )
+    log10_thermal_excess = (
+        log10_reverse_internal_energy - log10_reverse_mass - _LOG10_C2
+    )
+    compression = 4.0 * relative_gamma
+    log10_magnetic_field = 0.5 * (
+        math.log10(8.0 * math.pi)
+        + jnp.log10(epsilon_b)
+        + log10_upstream_density
+        + jnp.log10(compression)
+        + _LOG10_C2
+        + log10_thermal_excess
+    )
+    log10_gamma_maximum = 0.5 * (
+        math.log10(1.5 * _FOUR_PI * qe / sigma_T) - log10_magnetic_field
+    )
+    log10_base_gamma = (
+        jnp.log10(epsilon_e / accelerated_fraction)
+        + log10_thermal_excess
+        + math.log10(proton_mass / electron_mass)
+    )
+
+    def above_two(_):
+        return log10_base_gamma + jnp.log10(
+            (electron_index - 2.0) / (electron_index - 1.0)
+        )
+
+    def equal_two(_):
+        coefficient = 1.0 / (math.log(10.0) * (log10_gamma_maximum - log10_base_gamma))
+        return log10_base_gamma + jnp.log10(coefficient)
+
+    def below_two(_):
+        return (
+            jnp.log10((2.0 - electron_index) / (electron_index - 1.0))
+            + log10_base_gamma
+            + (electron_index - 2.0) * log10_gamma_maximum
+        ) / (electron_index - 1.0)
+
+    log10_gamma_minimum = lax.cond(
+        electron_index > 2.0,
+        above_two,
+        lambda _: lax.cond(electron_index == 2.0, equal_two, below_two, None),
+        None,
+    )
+    log10_gamma_minimum = jnp.maximum(log10_gamma_minimum, 0.0)
+    log10_nu_minimum_prime = (
+        jnp.log10(
+            3.0 * spectral_peak * qe / (_FOUR_PI * electron_mass * speed_of_light)
+        )
+        + 2.0 * log10_gamma_minimum
+        + log10_magnetic_field
+    )
+    log10_peak_power = (
+        jnp.log10(accelerated_fraction * peak_flux_factor)
+        + math.log10(electron_mass * speed_of_light**2 * sigma_T / (3.0 * qe))
+        + log10_magnetic_field
+    )
+    log10_electron_energy = log10_gamma_minimum + math.log10(
+        electron_mass * speed_of_light**2
+    )
+    solid_angle = azimuth_step * (
+        jnp.cos(theta - 0.5 * latitude_step) - jnp.cos(theta + 0.5 * latitude_step)
+    )
+    return ShockState(
+        beta,
+        log10_electrons,
+        solid_angle,
+        radius,
+        log10_magnetic_field,
+        log10_gamma_minimum,
+        log10_nu_minimum_prime,
+        log10_peak_power,
+        log10_electron_energy,
+    )
+
+
+def _four_velocity_for_radiation(gamma):
+    return jnp.sqrt(jnp.maximum((gamma - 1.0) * (gamma + 1.0), 0.0))
+
+
 @jit
 def observer_state(
     log10_distance,
@@ -202,6 +318,63 @@ def observer_state(
         - jnp.log10(gamma)
         - 2.0 * shock.log10_magnetic_field
         - jnp.log10(on_axis_time)
+    )
+    log10_nu_cooling = (
+        log10_doppler
+        + math.log10(0.286 * 3.0 * qe / (_FOUR_PI * electron_mass * speed_of_light))
+        + 2.0 * log10_gamma_cooling
+        + shock.log10_magnetic_field
+    )
+    log10_nu_minimum = log10_doppler + shock.log10_nu_minimum_prime
+    log10_peak_flux = (
+        jnp.log10(initial_solid_angle)
+        + shock.log10_electrons
+        - math.log10(_FOUR_PI)
+        + shock.log10_peak_power
+        + 3.0 * log10_doppler
+        - math.log10(_FOUR_PI)
+        - 2.0 * log10_distance
+    )
+    visible_solid_angle = jnp.maximum(initial_solid_angle, shock.solid_angle)
+    cosine_edge = 1.0 - visible_solid_angle / azimuth_step
+    log10_blackbody_factor = (
+        jnp.log10(2.0 * visible_solid_angle * cosine_edge)
+        + log10_doppler
+        + shock.log10_electron_energy
+        + 2.0 * jnp.log10(shock.radius)
+        - 2.0 * math.log10(speed_of_light)
+        - 2.0 * log10_distance
+    )
+    return ObserverState(
+        log10_blackbody_factor,
+        log10_peak_flux,
+        log10_nu_cooling,
+        log10_nu_minimum,
+        observer_time,
+    )
+
+
+@jit
+def reverse_observer_state(
+    log10_distance,
+    initial_solid_angle,
+    azimuth_step,
+    observer_angle_value,
+    bulk_gamma,
+    comoving_time,
+    shock,
+):
+    """Transform a reverse-shock state using its evolved comoving age."""
+    cosine = jnp.cos(observer_angle_value)
+    radius_increment = jnp.diff(shock.radius, prepend=0.0)
+    observer_time = jnp.cumsum(
+        radius_increment * (1.0 / shock.beta - cosine) / speed_of_light
+    )
+    log10_doppler = -jnp.log10(bulk_gamma * (1.0 - shock.beta * cosine))
+    log10_gamma_cooling = (
+        math.log10(6.0 * math.pi * electron_mass * speed_of_light / sigma_T)
+        - 2.0 * shock.log10_magnetic_field
+        - jnp.log10(comoving_time)
     )
     log10_nu_cooling = (
         log10_doppler

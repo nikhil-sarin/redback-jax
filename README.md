@@ -52,6 +52,13 @@ Angular `res` and radial `steps` are static compilation settings. Their
 defaults are 50 and 250; reducing them is useful for exploratory inference,
 while convergence studies should increase both explicitly.
 
+The same wrappers accept arbitrary two-dimensional jet-structure callables,
+pluggable synchrotron prescriptions, and arbitrary radial CSM profiles. Set
+`reverse_shock=True` with a source-frame `engine_duration` to use the coupled
+unmagnetized finite-width forward/reverse-shock backend; reverse-shock
+microphysics can be set independently. See the afterglow documentation for the
+callable contracts and current limitations.
+
 ### Spectra pipeline
 
 `make_spectra_model(bolometric_fn)` wraps any bolometric model into a full SED pipeline:
