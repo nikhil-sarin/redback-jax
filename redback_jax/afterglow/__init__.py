@@ -1,8 +1,8 @@
 """Composable JAX primitives for native Redback afterglow models."""
 
-from .geometry import angular_mesh, observer_angle
 from .core import native_afterglow_flux_density
 from .dynamics import legacy_impulsive_dynamics
+from .geometry import angular_mesh, observer_angle
 from .medium import power_law_density, swept_mass_derivative
 from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
 from .structure import jet_structure

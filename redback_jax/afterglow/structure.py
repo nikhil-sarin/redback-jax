@@ -52,13 +52,13 @@ def jet_structure(
         core = jnp.exp(-0.5 * (theta / theta_core) ** 2)
         wing = jnp.exp(-0.5 * (theta / theta_jet) ** 2)
         numerator = (1.0 - structure_energy) * core + structure_energy * wing
-        denominator = (
-            (1.0 - structure_energy / structure_gamma) * core
-            + (structure_energy / structure_gamma) * wing
-        )
+        denominator = (1.0 - structure_energy / structure_gamma) * core + (
+            structure_energy / structure_gamma
+        ) * wing
         factor = jnp.where(denominator > 0.0, numerator / denominator, 0.0)
-        gamma = jnp.where(jnp.isfinite(factor), (gamma_core - 1.0) * factor + floor,
-                          structure_gamma)
+        gamma = jnp.where(
+            jnp.isfinite(factor), (gamma_core - 1.0) * factor + floor, structure_gamma
+        )
         return gamma, energy_core * numerator
 
     raise ValueError(f"Unknown jet structure: {kind}")
