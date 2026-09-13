@@ -49,6 +49,9 @@ def _native_redback_wrapper(
     density_function=None,
     density_parameters=None,
     log10_swept_mass_initial=None,
+    engine_function=None,
+    engine_parameters=None,
+    gamma_engine=1000.0,
 ):
     distance = (
         wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * MPC_TO_CM
@@ -83,6 +86,9 @@ def _native_redback_wrapper(
         density_function=density_function,
         density_parameters=density_parameters,
         log10_swept_mass_initial=log10_swept_mass_initial,
+        engine_function=engine_function,
+        engine_parameters=engine_parameters,
+        gamma_engine=gamma_engine,
     )
     return _format_afterglow_output(flux, output_format)
 

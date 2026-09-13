@@ -13,10 +13,17 @@ from .dynamics import (
     arbitrary_csm_impulsive_dynamics,
     legacy_impulsive_dynamics,
     legacy_refreshed_dynamics,
+    powered_thin_shell_dynamics,
 )
 from .geometry import angular_mesh, observer_angle
 from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
 from .structure import jet_structure
+
+
+def _legacy_power_law_profile(log10_radius, parameters):
+    log10_coefficient, density_index = parameters
+    return log10_coefficient - density_index * log10_radius
+
 
 _P_GRID = jnp.array([1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.7, 3.0, 3.2, 3.4])
 _SPECTRAL_PEAK = jnp.array(
@@ -53,6 +60,7 @@ def _log10_linear_interpolate(x, xp, log10_yp):
         "expansion",
         "refreshed",
         "density_function",
+        "engine_function",
     ),
 )
 def native_afterglow_flux_density(
@@ -85,6 +93,9 @@ def native_afterglow_flux_density(
     density_function=None,
     density_parameters=None,
     log10_swept_mass_initial=None,
+    engine_function=None,
+    engine_parameters=None,
+    gamma_engine=1000.0,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -110,7 +121,58 @@ def native_afterglow_flux_density(
     )
     radius_override = None
     local_density_override = None
-    if density_function is not None:
+    if engine_function is not None:
+        if refreshed:
+            raise ValueError("continuous and refreshed injection cannot be combined")
+        active_density_function = (
+            _legacy_power_law_profile if density_function is None else density_function
+        )
+        active_density_parameters = (
+            (legacy_log10_density, density_index)
+            if density_function is None
+            else density_parameters
+        )
+        if log10_swept_mass_initial is None:
+            if density_function is None:
+                initial_mass = (
+                    math.log10(4.0 * math.pi)
+                    - jnp.log10(3.0 - density_index)
+                    + legacy_log10_density
+                    + (3.0 - density_index) * 10.0
+                    + math.log10(1.67262192369e-24)
+                )
+            else:
+                density_at_minimum = density_function(10.0, density_parameters)
+                initial_mass = (
+                    math.log10(4.0 * math.pi / 3.0)
+                    + math.log10(1.67262192369e-24)
+                    + density_at_minimum
+                    + 30.0
+                )
+        else:
+            initial_mass = log10_swept_mass_initial
+        (
+            gamma,
+            gamma_minus_one,
+            log10_mass,
+            adiabatic_index,
+            radius_override,
+            local_density_override,
+            _,
+            _,
+        ) = powered_thin_shell_dynamics(
+            gamma_ring,
+            ring_log10_energy,
+            active_density_parameters,
+            initial_mass,
+            active_density_function,
+            engine_parameters,
+            engine_function,
+            log10_engine_scale=jnp.log10(energy_fraction),
+            gamma_engine=gamma_engine,
+            steps=steps,
+        )
+    elif density_function is not None:
         if refreshed:
             raise ValueError(
                 "arbitrary CSM is not yet supported with refreshed dynamics"

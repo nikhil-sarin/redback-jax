@@ -53,9 +53,44 @@ log-log interpolation of a fixed radial table.
 The default initial swept mass assumes the density at ``1e10 cm`` fills the
 interior uniformly. Supply ``log10_swept_mass_initial`` when the inner profile
 requires a different enclosed mass. The current arbitrary-CSM backend is
-spherically radial and impulsive. It cannot yet be combined with the native
-refreshed-shell backend; continuous engine injection is a separate planned
-dynamics backend.
+spherically radial. It cannot be combined with the native refreshed-shell
+backend.
+
+Non-impulsive central engines
+------------------------------
+
+Non-refreshed ``_redback`` wrappers accept an ``engine_function`` that returns
+cumulative injected energy in ``log10(erg)``. Built-in histories are
+``constant_engine_cumulative_log10``,
+``fallback_engine_cumulative_log10`` (constant luminosity followed by
+``t^-5/3``), and ``tabulated_engine_cumulative_log10``.
+
+.. code-block:: python
+
+   import numpy as np
+
+   from redback_jax.afterglow import fallback_engine_cumulative_log10
+
+   flux_mjy = gaussian_redback(
+       # Standard arguments omitted here for clarity.
+       ...,
+       engine_function=fallback_engine_cumulative_log10,
+       engine_parameters=(52.0, np.log10(30.0 * 86400.0)),
+       gamma_engine=1000.0,
+   )
+
+These parameters are total injected ``log10(energy / erg)`` and engine break
+time in ``log10(seconds)``. Injection reaches each angular shell at retarded
+engine time ``t_lab - R / (beta_engine c)``.
+
+This is a powered thin-shell approximation intended for fast inference. It
+updates shell inertia as energy becomes available, but it does not model the
+spatially extended forward shock, reverse shock, and cocoon produced by
+relativistic hydrodynamics. It is not a numerical reproduction of `De Colle &
+Ramirez-Ruiz (2026) <https://arxiv.org/abs/2607.03548>`_. Their
+injection-duration diagnostic and released simulation products should be used
+for calibration before drawing quantitative conclusions from this
+approximation.
 
 Numerical configuration
 -----------------------
