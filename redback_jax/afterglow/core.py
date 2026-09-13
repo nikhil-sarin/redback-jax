@@ -9,7 +9,11 @@ from jax.scipy.special import logsumexp
 
 from redback_jax.constants import day_to_s
 
-from .dynamics import legacy_impulsive_dynamics, legacy_refreshed_dynamics
+from .dynamics import (
+    arbitrary_csm_impulsive_dynamics,
+    legacy_impulsive_dynamics,
+    legacy_refreshed_dynamics,
+)
 from .geometry import angular_mesh, observer_angle
 from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
 from .structure import jet_structure
@@ -42,7 +46,14 @@ def _log10_linear_interpolate(x, xp, log10_yp):
 
 @partial(
     jit,
-    static_argnames=("structure_kind", "resolution", "steps", "expansion", "refreshed"),
+    static_argnames=(
+        "structure_kind",
+        "resolution",
+        "steps",
+        "expansion",
+        "refreshed",
+        "density_function",
+    ),
 )
 def native_afterglow_flux_density(
     time,
@@ -71,6 +82,9 @@ def native_afterglow_flux_density(
     gamma_injection=2.0,
     energy_factor=1.0,
     injection_index=0.0,
+    density_function=None,
+    density_parameters=None,
+    log10_swept_mass_initial=None,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -94,7 +108,41 @@ def native_afterglow_flux_density(
     legacy_log10_density = jnp.where(
         density_index == 2.0, log10_density + math.log10(3.0e35), log10_density
     )
-    if refreshed:
+    radius_override = None
+    local_density_override = None
+    if density_function is not None:
+        if refreshed:
+            raise ValueError(
+                "arbitrary CSM is not yet supported with refreshed dynamics"
+            )
+        density_at_minimum = density_function(10.0, density_parameters)
+        default_initial_mass = (
+            math.log10(4.0 * math.pi / 3.0)
+            + math.log10(1.67262192369e-24)
+            + density_at_minimum
+            + 30.0
+        )
+        initial_mass = (
+            default_initial_mass
+            if log10_swept_mass_initial is None
+            else log10_swept_mass_initial
+        )
+        (
+            gamma,
+            gamma_minus_one,
+            log10_mass,
+            adiabatic_index,
+            radius_override,
+            local_density_override,
+        ) = arbitrary_csm_impulsive_dynamics(
+            gamma_ring,
+            ring_log10_energy,
+            density_parameters,
+            initial_mass,
+            density_function,
+            steps=steps,
+        )
+    elif refreshed:
         ring_log10_energy_maximum = (
             jnp.log10(energy_factor) + log10_energy + 2.0 * jnp.log10(energy_fraction)
         )
@@ -141,6 +189,8 @@ def native_afterglow_flux_density(
             expansion,
             expansion_index,
             resolution,
+            radius_override,
+            local_density_override,
         )
     )(gamma, gamma_minus_one, log10_mass, theta, adiabatic_index)
 

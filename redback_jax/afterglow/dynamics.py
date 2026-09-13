@@ -5,6 +5,7 @@ from functools import partial
 
 import jax.numpy as jnp
 from jax import jit, lax
+from jax.scipy.special import logsumexp
 
 from redback_jax.constants import proton_mass, speed_of_light
 
@@ -238,3 +239,126 @@ def legacy_refreshed_dynamics(
     _, history = lax.scan(step, initial, None, length=steps)
     gamma, gamma_minus_one, log10_mass, g_hat = history
     return gamma.T, gamma_minus_one.T, log10_mass.T, g_hat.T
+
+
+@partial(jit, static_argnames=("density_function", "steps"))
+def arbitrary_csm_impulsive_dynamics(
+    gamma_initial,
+    log10_energy,
+    density_parameters,
+    log10_swept_mass_initial,
+    density_function,
+    thermal_fraction=0.0,
+    log10_radius_minimum=10.0,
+    log10_radius_maximum=24.0,
+    steps=250,
+):
+    """Evolve an impulsive blast wave through an arbitrary radial CSM.
+
+    ``density_function(log10_radius, density_parameters)`` must return
+    ``log10(number density / cm^-3)``. The initial enclosed swept mass is in
+    grams. A static callable keeps the function JIT-compatible while its
+    parameter PyTree remains differentiable.
+    """
+    gamma_initial = jnp.atleast_1d(gamma_initial)
+    log10_energy = jnp.broadcast_to(log10_energy, gamma_initial.shape)
+    gamma_minus_one_initial = gamma_initial - 1.0
+    log10_ejecta_mass = log10_energy - jnp.log10(gamma_initial) - _LOG10_C_SQUARED
+
+    radius_edges = jnp.linspace(log10_radius_minimum, log10_radius_maximum, steps + 1)
+    radius_midpoints = 0.5 * (radius_edges[:-1] + radius_edges[1:])
+    log10_density_edges = density_function(radius_edges, density_parameters)
+    log10_density_midpoints = density_function(radius_midpoints, density_parameters)
+    radial_step = (log10_radius_maximum - log10_radius_minimum) / steps
+    integration_constant = (
+        _LOG10_FOUR_PI
+        + _LOG10_PROTON_MASS
+        + math.log10(math.log(10.0))
+        + math.log10(radial_step / 6.0)
+    )
+    edge_integrand = log10_density_edges + 3.0 * radius_edges
+    stacked_integrands = jnp.stack(
+        (
+            edge_integrand[:-1],
+            log10_density_midpoints + 3.0 * radius_midpoints + math.log10(4.0),
+            edge_integrand[1:],
+        )
+    )
+    log10_shell_mass = integration_constant + logsumexp(
+        stacked_integrands * math.log(10.0), axis=0
+    ) / math.log(10.0)
+
+    def accumulate(log10_mass, log10_increment):
+        next_mass = _log10_add(log10_mass, log10_increment)
+        return next_mass, log10_mass
+
+    _, log10_mass_grid = lax.scan(
+        accumulate, log10_swept_mass_initial, log10_shell_mass
+    )
+    mass_steps = jnp.diff(
+        jnp.concatenate(
+            (
+                log10_mass_grid,
+                jnp.asarray([_log10_add(log10_mass_grid[-1], log10_shell_mass[-1])]),
+            )
+        )
+    )
+    factor_steps = -mass_steps * math.log(10.0)
+
+    def dynamical_step(gamma_minus_one, inputs):
+        log10_mass, mass_step, factor = inputs
+        g_hat = _adiabatic_index(gamma_minus_one)
+        first = _rk_increment(
+            g_hat,
+            log10_mass,
+            gamma_minus_one,
+            log10_ejecta_mass,
+            factor,
+            thermal_fraction,
+        )
+        second = _rk_increment(
+            g_hat,
+            log10_mass + 0.5 * mass_step,
+            gamma_minus_one + 0.5 * first,
+            log10_ejecta_mass,
+            factor,
+            thermal_fraction,
+        )
+        third = _rk_increment(
+            g_hat,
+            log10_mass + 0.5 * mass_step,
+            gamma_minus_one + 0.5 * second,
+            log10_ejecta_mass,
+            factor,
+            thermal_fraction,
+        )
+        fourth = _rk_increment(
+            g_hat,
+            log10_mass + mass_step,
+            gamma_minus_one + third,
+            log10_ejecta_mass,
+            factor,
+            thermal_fraction,
+        )
+        next_u = (
+            gamma_minus_one
+            + (first + 2.0 * (second + third) + fourth) / 6.0
+            + _NATIVE_GAMMA_INCREMENT
+        )
+        return next_u, (1.0 + gamma_minus_one, gamma_minus_one, g_hat)
+
+    _, history = lax.scan(
+        dynamical_step,
+        gamma_minus_one_initial,
+        (log10_mass_grid, mass_steps, factor_steps),
+    )
+    gamma, gamma_minus_one, g_hat = history
+    radius = jnp.power(10.0, radius_edges[:-1])
+    return (
+        gamma.T,
+        gamma_minus_one.T,
+        jnp.broadcast_to(log10_mass_grid, gamma.T.shape),
+        g_hat.T,
+        radius,
+        log10_density_edges[:-1],
+    )

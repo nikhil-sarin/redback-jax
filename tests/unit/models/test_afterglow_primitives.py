@@ -7,6 +7,7 @@ import pytest
 
 from redback_jax.afterglow import (
     angular_mesh,
+    arbitrary_csm_impulsive_dynamics,
     forward_shock_state,
     jet_structure,
     legacy_impulsive_dynamics,
@@ -15,8 +16,11 @@ from redback_jax.afterglow import (
     observer_angle,
     observer_state,
     power_law_density,
+    power_law_log_density,
+    smoothly_broken_power_law_log_density,
     swept_mass_derivative,
     synchrotron_log_flux,
+    tabulated_log_density,
 )
 from redback_jax.constants import proton_mass
 from redback_jax.models import (
@@ -34,6 +38,10 @@ from redback_jax.models import (
     twocomponent_redback,
     twocomponent_redback_refreshed,
 )
+
+
+def _power_law_profile(log10_radius, parameters):
+    return power_law_log_density(log10_radius, *parameters)
 
 
 def test_angular_mesh_has_expected_size_and_solid_angle():
@@ -87,6 +95,117 @@ def test_general_power_law_medium_and_swept_mass():
     np.testing.assert_allclose(density, [10.0, 10.0 * 2.0**-1.5])
     derivative = swept_mass_derivative(radius, density, 0.1, proton_mass)
     assert bool(jnp.all(derivative > 0.0))
+
+
+def test_flexible_medium_profiles_are_normalized_and_differentiable():
+    radii = jnp.array([15.0, 16.0, 17.0])
+    smooth = smoothly_broken_power_law_log_density(radii, 3.0, 16.0, 0.5, 2.0, 5.0)
+    assert smooth[1] == pytest.approx(3.0)
+    assert smooth[0] > smooth[1] > smooth[2]
+    tabulated = tabulated_log_density(radii, radii, jnp.array([4.0, 3.0, 1.0]))
+    np.testing.assert_allclose(tabulated, [4.0, 3.0, 1.0])
+    derivative = jax.grad(
+        lambda index: smoothly_broken_power_law_log_density(
+            17.0, 3.0, 16.0, 0.5, index, 5.0
+        )
+    )(2.0)
+    assert bool(jnp.isfinite(derivative))
+
+
+@pytest.mark.parametrize("density_index", [0.0, 1.0, 2.0])
+def test_arbitrary_csm_solver_recovers_power_law_legacy_limit(density_index):
+    log10_density = 0.0
+    initial_mass = (
+        np.log10(4.0 * np.pi / (3.0 - density_index))
+        + log10_density
+        + (3.0 - density_index) * 10.0
+        + np.log10(proton_mass)
+    )
+    generalized = arbitrary_csm_impulsive_dynamics(
+        jnp.array([100.0]),
+        jnp.array([52.0]),
+        (log10_density, 0.0, density_index),
+        initial_mass,
+        _power_law_profile,
+        steps=128,
+    )
+    legacy = legacy_impulsive_dynamics(
+        jnp.array([100.0]),
+        jnp.array([52.0]),
+        log10_density,
+        density_index=density_index,
+        steps=128,
+    )
+    indices = jnp.array([0, 32, 64, 96, 127])
+    np.testing.assert_allclose(
+        generalized[0][:, indices], legacy[0][:, indices], rtol=2e-3, atol=2e-5
+    )
+    np.testing.assert_allclose(
+        generalized[2][:, indices], legacy[2][:, indices], rtol=0.0, atol=2e-3
+    )
+
+
+def test_arbitrary_csm_lightcurve_recovers_uniform_medium():
+    common = dict(
+        time=jnp.array([1.0, 10.0, 100.0]),
+        frequency=1.0e9,
+        redshift=0.01,
+        theta_observer=0.05,
+        log10_energy=52.0,
+        theta_core=0.2,
+        theta_jet=0.2,
+        log10_density=0.0,
+        electron_index=2.2,
+        log10_epsilon_e=-1.0,
+        log10_epsilon_b=-2.0,
+        gamma_initial=100.0,
+        accelerated_fraction=1.0,
+        log10_luminosity_distance=jnp.log10(1.3776657447116507e26),
+        structure_kind="tophat",
+        expansion=False,
+        resolution=8,
+        steps=128,
+    )
+    legacy = native_afterglow_flux_density(**common)
+    generalized = native_afterglow_flux_density(
+        **common,
+        density_function=_power_law_profile,
+        density_parameters=(0.0, 0.0, 0.0),
+    )
+    np.testing.assert_allclose(generalized, legacy, rtol=0.015)
+
+
+def _broken_profile(log10_radius, parameters):
+    return smoothly_broken_power_law_log_density(log10_radius, *parameters)
+
+
+def test_broken_csm_lightcurve_is_finite_and_differentiable():
+    def total_flux(outer_index):
+        return native_afterglow_flux_density(
+            time=jnp.array([1.0, 10.0]),
+            frequency=3.0e9,
+            redshift=0.01,
+            theta_observer=0.05,
+            log10_energy=52.0,
+            theta_core=0.2,
+            theta_jet=0.2,
+            log10_density=0.0,
+            electron_index=2.2,
+            log10_epsilon_e=-1.0,
+            log10_epsilon_b=-2.0,
+            gamma_initial=100.0,
+            accelerated_fraction=1.0,
+            log10_luminosity_distance=jnp.log10(1.3776657447116507e26),
+            structure_kind="tophat",
+            expansion=False,
+            resolution=6,
+            steps=96,
+            density_function=_broken_profile,
+            density_parameters=(2.0, 17.0, 0.5, outer_index, 5.0),
+        ).sum()
+
+    assert bool(jnp.isfinite(total_flux(2.0)))
+    assert bool(jnp.isfinite(jax.grad(total_flux)(2.0)))
 
 
 def test_legacy_dynamics_matches_native_redback_fixture():
