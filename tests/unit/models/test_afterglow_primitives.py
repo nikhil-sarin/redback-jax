@@ -8,8 +8,11 @@ from redback_jax.afterglow import (
     jet_structure,
     legacy_impulsive_dynamics,
     observer_angle,
+    observer_state,
     power_law_density,
     swept_mass_derivative,
+    forward_shock_state,
+    synchrotron_log_flux,
 )
 from redback_jax.constants import proton_mass
 
@@ -53,7 +56,7 @@ def test_general_power_law_medium_and_swept_mass():
 
 
 def test_legacy_dynamics_matches_native_redback_fixture():
-    gamma, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
+    gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
         jnp.array([100.0, 30.0]), jnp.array([52.0, 50.0]), 0.0, steps=64)
     indices = jnp.array([0, 16, 32, 48, 63])
     expected_gamma = np.array([
@@ -73,3 +76,48 @@ def test_legacy_dynamics_matches_native_redback_fixture():
     np.testing.assert_allclose(log10_mass[:, indices], expected_log10_mass, rtol=2e-6)
     np.testing.assert_allclose(adiabatic_index[:, indices], expected_adiabatic_index,
                                rtol=2e-6)
+    assert bool(jnp.all(gamma_minus_one > 0.0))
+
+
+def test_synchrotron_pipeline_matches_native_redback_fixture():
+    gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
+        jnp.array([100.0]), jnp.array([52.0]), 0.0, steps=64)
+    solid_angle, theta, phi = angular_mesh(0.4, resolution=16)
+    shock = forward_shock_state(
+        gamma[0], gamma_minus_one[0], log10_mass[0], 2.2, 0.579, 0.612, 0.01, 0.1,
+        0.0, 0.0, theta[0], adiabatic_index[0], 2 * jnp.pi / 16,
+        0.4 / 16, expansion=False, resolution=16)
+    observed = observer_state(28.0, solid_angle[0], 2 * jnp.pi / 16,
+                              0.1, gamma[0], shock)
+    log10_flux = synchrotron_log_flux(observed, 9.0, 2.2)
+    indices = jnp.array([0, 16, 32, 48, 63])
+
+    expected_radius = np.array(
+        [1e10, 3.1622776601683746e13, 1e17, 3.162277660168373e20,
+         6.042963902381311e23])
+    expected_magnetic_field = np.array(
+        [3.8823333655498216, 3.882333364518495, 1.1290886985345698,
+         1.9141157541353547e-5, 1.9212599146843117e-9])
+    expected_peak_flux = np.array(
+        [2.275757932523929e-52, 7.196578473673764e-42,
+         1.965836062698856e-30, 4.567084217905911e-27,
+         3.1923046972748673e-21])
+    expected_observer_time = np.array(
+        [0.001683110572595627, 5.322462963325076, 17671.424078218985,
+         8.748192555398361e12, 1.9118792102454513e20])
+    expected_flux = np.array(
+        [4.094492471322591e-54, 1.294792208078938e-43,
+         8.459652440984453e-32, 1.2732466486735169e-37,
+         8.996039391362757e-44])
+
+    np.testing.assert_allclose(shock.radius[indices], expected_radius, rtol=3e-5)
+    np.testing.assert_allclose(
+        shock.log10_magnetic_field[indices], np.log10(expected_magnetic_field),
+        rtol=0.0, atol=0.01)
+    np.testing.assert_allclose(
+        observed.log10_peak_flux[indices], np.log10(expected_peak_flux),
+        rtol=0.0, atol=0.015)
+    np.testing.assert_allclose(jnp.log10(observed.observer_time[indices]),
+                               np.log10(expected_observer_time), rtol=0.0, atol=0.015)
+    np.testing.assert_allclose(log10_flux[indices], np.log10(expected_flux),
+                               rtol=0.0, atol=0.05)

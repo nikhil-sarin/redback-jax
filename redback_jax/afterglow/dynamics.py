@@ -11,10 +11,13 @@ from redback_jax.constants import proton_mass, speed_of_light
 _LOG10_FOUR_PI = math.log10(4.0 * math.pi)
 _LOG10_PROTON_MASS = math.log10(proton_mass)
 _LOG10_C_SQUARED = 2.0 * math.log10(speed_of_light)
+# Native Redback adds 1e-15 to a float64 Lorentz factor; at Gamma ~= 1 this
+# rounds to five float64 ULPs. Preserve that effective increment in Gamma-1.
+_NATIVE_GAMMA_INCREMENT = 5.0 * 2.220446049250313e-16
 
 
-def _adiabatic_index(gamma):
-    gamma_squared_minus_one = gamma**2 - 1.0
+def _adiabatic_index(gamma_minus_one):
+    gamma_squared_minus_one = gamma_minus_one * (2.0 + gamma_minus_one)
     root = jnp.sqrt(jnp.maximum(gamma_squared_minus_one, 0.0))
     temperature = root * (root + 1.07 * gamma_squared_minus_one) / (
         3.0 * (1.0 + root + 1.07 * gamma_squared_minus_one)
@@ -26,17 +29,19 @@ def _adiabatic_index(gamma):
     ) / 3.0
 
 
-def _rk_increment(g_hat, log10_mass, gamma, log10_ejecta_mass, factor, thermal):
+def _rk_increment(g_hat, log10_mass, gamma_minus_one, log10_ejecta_mass,
+                  factor, thermal):
     mass_ratio = jnp.power(10.0, log10_mass - log10_ejecta_mass)
-    gamma_squared = gamma**2
+    gamma = 1.0 + gamma_minus_one
+    gamma_squared_minus_one = gamma_minus_one * (2.0 + gamma_minus_one)
     numerator = mass_ratio * (
-        g_hat * (gamma_squared - 1.0)
-        - (g_hat - 1.0) * (gamma - 1.0 / gamma)
+        g_hat * gamma_squared_minus_one
+        - (g_hat - 1.0) * gamma_squared_minus_one / gamma
     )
     denominator = 1.0 + mass_ratio * (
         thermal
         + (1.0 - thermal)
-        * (2.0 * g_hat * gamma - (g_hat - 1.0) * (1.0 + 1.0 / gamma_squared))
+        * (2.0 * g_hat * gamma - (g_hat - 1.0) * (1.0 + gamma**-2))
     )
     return factor * numerator / denominator
 
@@ -58,9 +63,8 @@ def legacy_impulsive_dynamics(
     """
     gamma_initial = jnp.atleast_1d(gamma_initial)
     log10_energy = jnp.broadcast_to(log10_energy, gamma_initial.shape)
-    log10_ejecta_mass = (
-        log10_energy - jnp.log10(gamma_initial) - _LOG10_C_SQUARED
-    )
+    gamma_minus_one_initial = gamma_initial - 1.0
+    log10_ejecta_mass = log10_energy - jnp.log10(gamma_initial) - _LOG10_C_SQUARED
 
     radial_power = 3.0 - density_index
     log10_mass_initial = (
@@ -72,22 +76,27 @@ def legacy_impulsive_dynamics(
     factor = -step_size * math.log(10.0)
 
     def step(carry, _):
-        gamma, log10_mass = carry
-        g_hat = _adiabatic_index(gamma)
-        first = _rk_increment(g_hat, log10_mass, gamma, log10_ejecta_mass,
+        gamma_minus_one, log10_mass = carry
+        g_hat = _adiabatic_index(gamma_minus_one)
+        first = _rk_increment(g_hat, log10_mass, gamma_minus_one, log10_ejecta_mass,
                               factor, thermal_fraction)
         second = _rk_increment(g_hat, log10_mass + 0.5 * step_size,
-                               gamma + 0.5 * first, log10_ejecta_mass,
+                               gamma_minus_one + 0.5 * first, log10_ejecta_mass,
                                factor, thermal_fraction)
         third = _rk_increment(g_hat, log10_mass + 0.5 * step_size,
-                              gamma + 0.5 * second, log10_ejecta_mass,
+                              gamma_minus_one + 0.5 * second, log10_ejecta_mass,
                               factor, thermal_fraction)
-        fourth = _rk_increment(g_hat, log10_mass + step_size, gamma + third,
+        fourth = _rk_increment(g_hat, log10_mass + step_size,
+                               gamma_minus_one + third,
                                log10_ejecta_mass, factor, thermal_fraction)
-        next_gamma = gamma + (first + 2.0 * (second + third) + fourth) / 6.0
-        return (next_gamma, log10_mass + step_size), (gamma, log10_mass, g_hat)
+        next_gamma_minus_one = (
+            gamma_minus_one + (first + 2.0 * (second + third) + fourth) / 6.0
+            + _NATIVE_GAMMA_INCREMENT
+        )
+        output = (1.0 + gamma_minus_one, gamma_minus_one, log10_mass, g_hat)
+        return (next_gamma_minus_one, log10_mass + step_size), output
 
-    _, history = lax.scan(step, (gamma_initial, log10_mass_initial), None,
+    _, history = lax.scan(step, (gamma_minus_one_initial, log10_mass_initial), None,
                           length=steps)
-    gamma, log10_mass, g_hat = history
-    return gamma.T, log10_mass.T, g_hat.T
+    gamma, gamma_minus_one, log10_mass, g_hat = history
+    return gamma.T, gamma_minus_one.T, log10_mass.T, g_hat.T
