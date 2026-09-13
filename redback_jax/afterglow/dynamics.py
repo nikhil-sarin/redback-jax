@@ -132,3 +132,109 @@ def legacy_impulsive_dynamics(
     )
     gamma, gamma_minus_one, log10_mass, g_hat = history
     return gamma.T, gamma_minus_one.T, log10_mass.T, g_hat.T
+
+
+def _log10_add(log10_a, log10_b):
+    maximum = jnp.maximum(log10_a, log10_b)
+    return maximum + jnp.log10(
+        jnp.power(10.0, log10_a - maximum) + jnp.power(10.0, log10_b - maximum)
+    )
+
+
+@partial(jit, static_argnames=("steps",))
+def legacy_refreshed_dynamics(
+    gamma_initial,
+    gamma_injection,
+    log10_energy_initial,
+    log10_energy_maximum,
+    injection_index,
+    log10_density,
+    density_index=0.0,
+    thermal_fraction=0.0,
+    steps=250,
+):
+    """Reproduce Redback's refreshed-shell dynamics in scaled variables."""
+    gamma_initial = jnp.atleast_1d(gamma_initial)
+    log10_energy_initial = jnp.broadcast_to(log10_energy_initial, gamma_initial.shape)
+    log10_energy_maximum = jnp.broadcast_to(log10_energy_maximum, gamma_initial.shape)
+    gamma_minus_one_initial = gamma_initial - 1.0
+    log10_ejecta_mass = (
+        log10_energy_initial - jnp.log10(gamma_initial) - _LOG10_C_SQUARED
+    )
+    radial_power = 3.0 - density_index
+    # The native refreshed implementation uses 4 pi / 3 for both k=0 and k=2.
+    log10_mass_initial = (
+        _LOG10_FOUR_PI
+        - math.log10(3.0)
+        + log10_density
+        + radial_power * 10.0
+        + _LOG10_PROTON_MASS
+    )
+    log10_mass_initial = jnp.broadcast_to(log10_mass_initial, gamma_initial.shape)
+    step_size = radial_power * (24.0 - 10.0) / steps
+    factor = -step_size * math.log(10.0)
+    beta_injection = jnp.sqrt(gamma_injection**2 - 1.0) / gamma_injection
+
+    def step(carry, _):
+        gamma_minus_one, log10_mass, log10_ejecta, log10_energy = carry
+        g_hat = _adiabatic_index(gamma_minus_one)
+        first = _rk_increment(
+            g_hat, log10_mass, gamma_minus_one, log10_ejecta, factor, thermal_fraction
+        )
+        second = _rk_increment(
+            g_hat,
+            log10_mass + 0.5 * step_size,
+            gamma_minus_one + 0.5 * first,
+            log10_ejecta,
+            factor,
+            thermal_fraction,
+        )
+        third = _rk_increment(
+            g_hat,
+            log10_mass + 0.5 * step_size,
+            gamma_minus_one + 0.5 * second,
+            log10_ejecta,
+            factor,
+            thermal_fraction,
+        )
+        fourth = _rk_increment(
+            g_hat,
+            log10_mass + step_size,
+            gamma_minus_one + third,
+            log10_ejecta,
+            factor,
+            thermal_fraction,
+        )
+        next_u = gamma_minus_one + (first + 2.0 * (second + third) + fourth) / 6.0
+        next_gamma = 1.0 + next_u
+        beta_next = jnp.sqrt(next_u * (2.0 + next_u)) / next_gamma
+        candidate_energy = log10_energy_initial - injection_index * jnp.log10(
+            beta_next / beta_injection
+        )
+        next_energy = jnp.minimum(candidate_energy, log10_energy_maximum)
+        inject = next_gamma <= gamma_injection
+        next_energy = jnp.where(inject, next_energy, log10_energy)
+        energy_fraction = jnp.clip(
+            1.0 - jnp.power(10.0, log10_energy - next_energy), 0.0, 1.0
+        )
+        log10_delta_energy = next_energy + jnp.log10(energy_fraction)
+        log10_added_mass = (
+            log10_delta_energy - jnp.log10(1.0 + gamma_minus_one) - _LOG10_C_SQUARED
+        )
+        next_ejecta = jnp.where(
+            inject & (next_energy > log10_energy),
+            _log10_add(log10_ejecta, log10_added_mass),
+            log10_ejecta,
+        )
+        output = (1.0 + gamma_minus_one, gamma_minus_one, log10_mass, g_hat)
+        return (next_u, log10_mass + step_size, next_ejecta, next_energy), output
+
+    initial = (
+        gamma_minus_one_initial,
+        log10_mass_initial,
+        log10_ejecta_mass,
+        log10_energy_initial,
+    )
+    _, history = lax.scan(step, initial, None, length=steps)
+    gamma, gamma_minus_one, log10_mass, g_hat = history
+    return gamma.T, gamma_minus_one.T, log10_mass.T, g_hat.T

@@ -44,7 +44,8 @@ This is the natural unit for GPU inference — float32 can represent log10 value
 The six non-refreshed native Redback jet structures are available as
 `tophat_redback`, `gaussian_redback`, `twocomponent_redback`,
 `powerlaw_redback`, `alternativepowerlaw_redback`, and
-`doublegaussian_redback`. Supply observer-frame `frequency` in Hz and choose
+`doublegaussian_redback`. Their six `_refreshed` counterparts reproduce the
+native refreshed-shell energy prescription. Supply observer-frame `frequency` in Hz and choose
 `output_format="flux_density"` or `output_format="magnitude"`.
 
 Angular `res` and radial `steps` are static compilation settings. Their

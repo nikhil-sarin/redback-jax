@@ -26,11 +26,17 @@ from .tde_models import (
 )
 from .afterglow_models import (
     alternativepowerlaw_redback,
+    alternativepowerlaw_redback_refreshed,
     doublegaussian_redback,
+    doublegaussian_redback_refreshed,
     gaussian_redback,
+    gaussian_redback_refreshed,
     powerlaw_redback,
+    powerlaw_redback_refreshed,
     tophat_redback,
+    tophat_redback_refreshed,
     twocomponent_redback,
+    twocomponent_redback_refreshed,
 )
 
 # Kilonova models
@@ -86,6 +92,12 @@ register_model("twocomponent_redback", twocomponent_redback)
 register_model("powerlaw_redback", powerlaw_redback)
 register_model("alternativepowerlaw_redback", alternativepowerlaw_redback)
 register_model("doublegaussian_redback", doublegaussian_redback)
+register_model("tophat_redback_refreshed", tophat_redback_refreshed)
+register_model("gaussian_redback_refreshed", gaussian_redback_refreshed)
+register_model("twocomponent_redback_refreshed", twocomponent_redback_refreshed)
+register_model("powerlaw_redback_refreshed", powerlaw_redback_refreshed)
+register_model("alternativepowerlaw_redback_refreshed", alternativepowerlaw_redback_refreshed)
+register_model("doublegaussian_redback_refreshed", doublegaussian_redback_refreshed)
 register_model("metzger_kilonova_bolometric", metzger_kilonova_bolometric)
 register_model("magnetar_boosted_kilonova_bolometric", magnetar_boosted_kilonova_bolometric)
 register_model("general_magnetar_driven_supernova_bolometric", general_magnetar_driven_supernova_bolometric)
@@ -169,6 +181,12 @@ __all__ = [
     'powerlaw_redback',
     'alternativepowerlaw_redback',
     'doublegaussian_redback',
+    'tophat_redback_refreshed',
+    'gaussian_redback_refreshed',
+    'twocomponent_redback_refreshed',
+    'powerlaw_redback_refreshed',
+    'alternativepowerlaw_redback_refreshed',
+    'doublegaussian_redback_refreshed',
     # Kilonova models
     'metzger_kilonova_bolometric',
     'magnetar_boosted_kilonova_bolometric',
