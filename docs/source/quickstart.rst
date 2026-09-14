@@ -169,7 +169,8 @@ Available models
 - ``metzger_kilonova_bolometric`` — r-process ODE, 200-shell (Metzger 2017)
 - ``magnetar_boosted_kilonova_bolometric`` — r-process + magnetar injection
 
-All models are ``@jax.jit`` compiled and support ``jax.grad`` and ``jax.vmap``.
+Model kernels are JIT compiled, and supported paths compose with ``jax.grad``
+and ``jax.vmap`` for rapid repeated analyses.
 
 Next steps
 ----------
