@@ -4,16 +4,32 @@
 [![Tests](https://github.com/nikhil-sarin/redback-jax/workflows/Tests/badge.svg)](https://github.com/nikhil-sarin/redback-jax/actions)
 [![codecov](https://codecov.io/gh/nikhil-sarin/redback-jax/branch/main/graph/badge.svg)](https://codecov.io/gh/nikhil-sarin/redback-jax)
 
-A lightweight JAX-only rewrite of [redback](https://github.com/nikhil-sarin/redback) for electromagnetic transient modeling and Bayesian inference, designed to run efficiently on GPUs and TPUs in float32.
+A JAX-native companion to [Redback](https://github.com/nikhil-sarin/redback),
+built for rapid, differentiable electromagnetic-transient analysis on CPUs,
+GPUs, and TPUs.
 
 ## Overview
 
-Redback-JAX reimplements redback's analytical transient models in JAX, using log10-space arithmetic throughout to stay float32-safe on GPU hardware. All bolometric functions return `log10(L)` rather than linear luminosities (which exceed the float32 maximum of ~3.4×10³⁸ erg/s). The full spectra pipeline — photosphere, blackbody SED, and bandflux integration — also operates in log10 space end-to-end.
+Redback-JAX sits alongside the broader Redback stack. It provides JAX-native
+implementations of selected Redback models and composable modeling tools where
+JIT compilation, automatic differentiation, vectorization, and accelerator
+execution materially speed up analysis and inference. It is not intended to be
+a complete rewrite or drop-in replacement for Redback: use Redback for its
+full modeling and analysis ecosystem, and Redback-JAX when a supported workflow
+benefits from rapid repeated evaluation or gradients.
+
+Numerically demanding quantities are represented in log10 space where needed
+to remain float32-safe. Bolometric functions return `log10(L)`, while afterglow
+models return flux density or magnitude. The spectra pipeline carries
+photospheric and blackbody quantities safely through to band-integrated
+observables.
 
 ## Features
 
-- **Float32-safe physics**: All models operate in log10 space; no overflow on GPU even for luminosities ~10⁴⁵ erg/s
-- **JIT-compiled and differentiable**: Every model is decorated with `@jax.jit`; gradients flow through the full pipeline via `jax.grad`
+- **Designed for rapid analyses**: JIT-compiled kernels, vectorization, and reusable compiled likelihoods reduce repeated-evaluation cost
+- **Automatic differentiation**: Supported model paths expose gradients for optimization and gradient-based inference
+- **Accelerator-aware numerics**: Log-space and scaled-state implementations avoid float32 overflow where physical values require it
+- **Composable afterglows**: Native Redback jet families, arbitrary angular structures and CSM profiles, pluggable radiation, continuous injection, and reverse shocks
 - **`vmap`-based diffusion integrals**: Arnett-style diffusion uses `jax.vmap` over time points with log-mirror quadrature nodes
 - **Spectra pipeline**: `make_spectra_model(bolometric_fn)` wraps any bolometric model to produce time × wavelength spectra for bandflux/magnitude comparison
 - **Clean inference API**: `Prior`, `Likelihood`, `NestedSampler`, and `MCMCSampler` — compose a full Bayesian fit in ~15 lines
@@ -266,7 +282,7 @@ Optional (inference): `blackjax`, `flowmc`, `optax`
 
 ## Related Projects
 
-- [redback](https://github.com/nikhil-sarin/redback) — the original full-featured package
+- [Redback](https://github.com/nikhil-sarin/redback) — the full transient-modeling and analysis stack that Redback-JAX complements
 - [JAX-bandflux](https://github.com/samleeney/JAX-bandflux): `jax-bandflux`
 - [JAX](https://github.com/google/jax) — the underlying numerical computing library
 
@@ -276,7 +292,8 @@ GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
 ## Acknowledgments/Citations
 
-Based on the original [redback](https://github.com/nikhil-sarin/redback) package. 
+Developed alongside and in close connection with the
+[Redback](https://github.com/nikhil-sarin/redback) ecosystem.
 
 If you use Redback-JAX, please cite the redback paper. 
 Please make sure you also cite all relevant papers for the models. 

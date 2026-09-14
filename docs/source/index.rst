@@ -1,7 +1,9 @@
 redback-jax documentation
 =========================
 
-Welcome to redback-jax, a lightweight JAX-only version of the redback electromagnetic transient analysis package.
+Welcome to Redback-JAX, a JAX-native companion to the `Redback
+<https://github.com/nikhil-sarin/redback>`_ electromagnetic-transient
+modeling and analysis stack.
 
 .. toctree::
    :maxdepth: 2
@@ -18,17 +20,20 @@ Welcome to redback-jax, a lightweight JAX-only version of the redback electromag
 About redback-jax
 ----------------
 
-Redback-JAX provides JAX-based implementations for electromagnetic transient modeling and Bayesian inference, 
-focusing on performance and automatic differentiation capabilities. This package is designed to be a 
-lightweight alternative to the full redback package, leveraging JAX for fast computation and 
-gradient-based inference.
+Redback-JAX provides selected Redback models and composable JAX-native tools
+for rapid electromagnetic-transient analysis and Bayesian inference. It is
+designed to coexist with Redback rather than replace it: Redback supplies the
+broader modeling and analysis ecosystem, while Redback-JAX focuses on workflows
+that benefit from JIT compilation, vectorization, accelerator execution, and
+automatic differentiation.
 
 Features
 --------
 
-* **JAX-based models**: Fast, differentiable implementations of electromagnetic transient models
+* **Rapid model evaluation**: JIT-compiled and vectorized transient calculations
+* **Composable physics**: Flexible afterglow structure, dynamics, media, and radiation components
 * **Bayesian inference**: Integration with modern probabilistic programming libraries
-* **Automatic differentiation**: Gradient-based optimization and sampling
+* **Automatic differentiation**: Gradient-based optimization and sampling on supported paths
 * **GPU/TPU support**: Leverage JAX's hardware acceleration capabilities
 
 Indices and tables

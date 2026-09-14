@@ -1,8 +1,8 @@
 """
-Redback-JAX: A lightweight JAX-only version of the redback electromagnetic transient analysis package.
+Redback-JAX: a JAX-native companion to the Redback transient-analysis stack.
 
-This package provides JAX-based implementations for electromagnetic transient modeling
-and Bayesian inference, focusing on performance and automatic differentiation capabilities.
+The package provides selected models and composable workflows for rapid,
+differentiable electromagnetic-transient analysis and Bayesian inference.
 """
 
 __version__ = "0.4.1"
