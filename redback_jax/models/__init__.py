@@ -24,6 +24,21 @@ from .shock_powered_models import (
 # TDE models
 from .tde_models import (
     tde_analytical_bolometric,
+    tde_fallback_bolometric,
+)
+from .afterglow_models import (
+    alternativepowerlaw_redback,
+    alternativepowerlaw_redback_refreshed,
+    doublegaussian_redback,
+    doublegaussian_redback_refreshed,
+    gaussian_redback,
+    gaussian_redback_refreshed,
+    powerlaw_redback,
+    powerlaw_redback_refreshed,
+    tophat_redback,
+    tophat_redback_refreshed,
+    twocomponent_redback,
+    twocomponent_redback_refreshed,
 )
 
 # Kilonova models
@@ -74,6 +89,19 @@ register_model("shock_cooling_bolometric", shock_cooling_bolometric)
 register_model("shocked_cocoon_bolometric", shocked_cocoon_bolometric)
 register_model("shock_cooling_and_arnett_bolometric", shock_cooling_and_arnett_bolometric)
 register_model("tde_analytical_bolometric", tde_analytical_bolometric)
+register_model("tde_fallback_bolometric", tde_fallback_bolometric)
+register_model("tophat_redback", tophat_redback)
+register_model("gaussian_redback", gaussian_redback)
+register_model("twocomponent_redback", twocomponent_redback)
+register_model("powerlaw_redback", powerlaw_redback)
+register_model("alternativepowerlaw_redback", alternativepowerlaw_redback)
+register_model("doublegaussian_redback", doublegaussian_redback)
+register_model("tophat_redback_refreshed", tophat_redback_refreshed)
+register_model("gaussian_redback_refreshed", gaussian_redback_refreshed)
+register_model("twocomponent_redback_refreshed", twocomponent_redback_refreshed)
+register_model("powerlaw_redback_refreshed", powerlaw_redback_refreshed)
+register_model("alternativepowerlaw_redback_refreshed", alternativepowerlaw_redback_refreshed)
+register_model("doublegaussian_redback_refreshed", doublegaussian_redback_refreshed)
 register_model("metzger_kilonova_bolometric", metzger_kilonova_bolometric)
 register_model("magnetar_boosted_kilonova_bolometric", magnetar_boosted_kilonova_bolometric)
 register_model("general_magnetar_driven_supernova_bolometric", general_magnetar_driven_supernova_bolometric)
@@ -94,6 +122,7 @@ if _SPECTRA_MODEL_AVAILABLE:
     shocked_cocoon_spectra            = make_spectra_model(shocked_cocoon_bolometric)
     shock_cooling_and_arnett_spectra  = make_spectra_model(shock_cooling_and_arnett_bolometric)
     tde_analytical_spectra            = make_spectra_model(tde_analytical_bolometric)
+    tde_fallback_spectra              = make_spectra_model(tde_fallback_bolometric)
     metzger_kilonova_spectra          = make_spectra_model(metzger_kilonova_bolometric)
     magnetar_boosted_kilonova_spectra = make_spectra_model(magnetar_boosted_kilonova_bolometric)
 
@@ -112,6 +141,7 @@ if _SPECTRA_MODEL_AVAILABLE:
     register_model("shocked_cocoon_spectra",            shocked_cocoon_spectra)
     register_model("shock_cooling_and_arnett_spectra",  shock_cooling_and_arnett_spectra)
     register_model("tde_analytical_spectra",            tde_analytical_spectra)
+    register_model("tde_fallback_spectra",              tde_fallback_spectra)
     register_model("metzger_kilonova_spectra",          metzger_kilonova_spectra)
     register_model("magnetar_boosted_kilonova_spectra", magnetar_boosted_kilonova_spectra)
 else:
@@ -126,6 +156,7 @@ else:
     shocked_cocoon_spectra            = None
     shock_cooling_and_arnett_spectra  = None
     tde_analytical_spectra            = None
+    tde_fallback_spectra              = None
     metzger_kilonova_spectra          = None
     magnetar_boosted_kilonova_spectra = None
     general_magnetar_supernova_spectra_diffrax = None
@@ -149,6 +180,19 @@ __all__ = [
     'shock_cooling_and_arnett_bolometric',
     # TDE models
     'tde_analytical_bolometric',
+    'tde_fallback_bolometric',
+    'tophat_redback',
+    'gaussian_redback',
+    'twocomponent_redback',
+    'powerlaw_redback',
+    'alternativepowerlaw_redback',
+    'doublegaussian_redback',
+    'tophat_redback_refreshed',
+    'gaussian_redback_refreshed',
+    'twocomponent_redback_refreshed',
+    'powerlaw_redback_refreshed',
+    'alternativepowerlaw_redback_refreshed',
+    'doublegaussian_redback_refreshed',
     # Kilonova models
     'metzger_kilonova_bolometric',
     'magnetar_boosted_kilonova_bolometric',
@@ -173,6 +217,7 @@ __all__ = [
     'shocked_cocoon_spectra',
     'shock_cooling_and_arnett_spectra',
     'tde_analytical_spectra',
+    'tde_fallback_spectra',
     'metzger_kilonova_spectra',
     'magnetar_boosted_kilonova_spectra',
     # SED features

@@ -48,22 +48,100 @@ import numpy as np
 from jax import tree_util
 
 try:
-    import blackjax
-    from blackjax.ns.nss import as_top_level_api as _nss
-    from blackjax.ns.utils import log_weights as _bj_log_weights
+    import blackjax  # noqa: F401
     from blackjax.ns.utils import finalise as _bj_finalise
+    from blackjax.ns.utils import log_weights as _bj_log_weights
+
+    try:
+        # Newer BlackJAX NS API: state.sampler_state, dead.logL
+        from blackjax.ns.adaptive import nss as _nss
+
+        _NS_API = "adaptive"
+    except ImportError:
+        # handley-lab ``nested_sampling`` fork: state.integrator, dead.particles.*
+        from blackjax.ns.nss import as_top_level_api as _nss
+
+        _NS_API = "fork"
+
     HAS_BLACKJAX = True
-except ImportError:
+    _BLACKJAX_NS_IMPORT_ERROR = None
+except ImportError as _e:
     HAS_BLACKJAX = False
+    _BLACKJAX_NS_IMPORT_ERROR = _e
+
+
+# ---------------------------------------------------------------------------
+# BlackJAX NS API compatibility
+#
+# Two incompatible layouts exist in the wild:
+#   * newer API:  state.sampler_state.logZ,  dead.particles = positions array,
+#                 dead.logL / dead.logL_birth
+#   * fork API:   _ns_integrator(state).logZ,     dead.particles.position,
+#                 dead.particles.loglikelihood / .loglikelihood_birth
+# These helpers hide the difference so the samplers work with either.
+# ---------------------------------------------------------------------------
+
+def _build_nss(logprior_fn, loglikelihood_fn, n_mcmc_steps, n_delete,
+               max_shrinkage=25, max_steps=10):
+    """Construct the NS algorithm with whichever BlackJAX signature is installed.
+
+    ``max_shrinkage`` / ``max_steps`` are only understood by the fork API and
+    are ignored otherwise.
+    """
+    if _NS_API == "adaptive":
+        return _nss(
+            logprior_fn=logprior_fn,
+            loglikelihood_fn=loglikelihood_fn,
+            num_mcmc_steps=n_mcmc_steps,
+            n_delete=n_delete,
+        )
+    return _nss(
+        logprior_fn=logprior_fn,
+        loglikelihood_fn=loglikelihood_fn,
+        num_inner_steps=n_mcmc_steps,
+        num_delete=n_delete,
+        max_shrinkage=max_shrinkage,
+        max_steps=max_steps,
+    )
+
+
+def _ns_integrator(state):
+    """Return the object holding ``logZ`` / ``logZ_live``."""
+    if hasattr(state, "sampler_state"):
+        return state.sampler_state
+    return state.integrator
+
+
+def _dead_positions(dead):
+    """(n_points, n_params) positions of the dead points."""
+    particles = dead.particles
+    return particles.position if hasattr(particles, "position") else particles
+
+
+def _dead_logL(dead):
+    if hasattr(dead, "logL"):
+        return dead.logL
+    return dead.particles.loglikelihood
+
+
+def _dead_logL_birth(dead):
+    if hasattr(dead, "logL_birth"):
+        return dead.logL_birth
+    return dead.particles.loglikelihood_birth
+
 
 try:
     import tqdm as _tqdm
+
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
 
 try:
-    from jax_supernovae.utils import save_chains_dead_birth as _save_chains
+    from jax_supernovae.utils import (  # noqa: F401
+        save_chains_dead_birth as _save_chains,
+    )
+
     HAS_JSN_UTILS = True
 except ImportError:
     HAS_JSN_UTILS = False
@@ -89,27 +167,32 @@ class NSResult:
     """
 
     def __init__(self, logZ, samples, dead, log_weights, param_names):
-        self.logZ        = logZ
-        self.samples     = samples
-        self.dead        = dead
+        self.logZ = logZ
+        self.samples = samples
+        self.dead = dead
         self.log_weights = log_weights
         self.param_names = param_names
 
     def summary(self):
         """Print a parameter summary table."""
-        print(f"\n{'Param':<14} {'Mean':>12} {'Std':>10} {'q16':>10} {'q84':>10}")
+        header = f"\n{'Param':<14} {'Mean':>12} {'Std':>10} {'q16':>10} {'q84':>10}"  # noqa: E231,E501
+        print(header)
         print("-" * 58)
         for name in self.param_names:
-            s  = self.samples[name]
-            w  = jnp.exp(self.log_weights - jax.scipy.special.logsumexp(self.log_weights))
+            s = self.samples[name]
+            w = jnp.exp(
+                self.log_weights - jax.scipy.special.logsumexp(self.log_weights)
+            )
             mu = float(jnp.sum(w * s))
             sq = float(jnp.sum(w * (s - mu) ** 2)) ** 0.5
             q16 = float(jnp.percentile(s, 16))
             q84 = float(jnp.percentile(s, 84))
-            print(f"{name:<14} {mu:>12.4f} {sq:>10.4f} {q16:>10.4f} {q84:>10.4f}")
+            row = f"{name:<14} {mu:>12.4f} {sq:>10.4f} {q16:>10.4f} {q84:>10.4f}"  # noqa: E231,E501
+            print(row)
 
     def __repr__(self) -> str:
-        return f"NSResult(logZ={self.logZ:.2f}, n_samples={len(next(iter(self.samples.values())))})"
+        n = len(self.log_weights) if self.log_weights is not None else 0
+        return f"NSResult(logZ={self.logZ:.2f}, n_samples={n})"  # noqa: E231
 
 
 class NestedSampler:
@@ -146,7 +229,7 @@ class NestedSampler:
         self,
         likelihood,
         prior,
-        outdir: str = 'results/',
+        outdir: str = "results/",
         n_live: int = 125,
         n_delete: int = 20,
         num_mcmc_steps_multiplier: int = 5,
@@ -157,29 +240,32 @@ class NestedSampler:
     ):
         if not HAS_BLACKJAX:
             raise ImportError(
-                "blackjax is required for nested sampling.\n"
-                "Install with: pip install git+https://github.com/handley-lab/blackjax@proposal"
+                "blackjax nested-sampling API unavailable "
+                f"({_BLACKJAX_NS_IMPORT_ERROR}).\n"
+                "Install the handley-lab fork: pip install "
+                "git+https://github.com/handley-lab/blackjax@proposal\n"
+                "(Or use run_nested_sampling, which runs on mainline blackjax.)"
             )
 
-        self.likelihood   = likelihood
-        self.prior        = prior
-        self.outdir       = outdir
-        self.n_live       = n_live
-        self.n_delete     = n_delete
+        self.likelihood = likelihood
+        self.prior = prior
+        self.outdir = outdir
+        self.n_live = n_live
+        self.n_delete = n_delete
         self.n_mcmc_steps = prior.n_params * num_mcmc_steps_multiplier
-        self.term_dlogz   = termination_dlogz
-        self.verbose      = verbose
+        self.term_dlogz = termination_dlogz
+        self.verbose = verbose
 
         # Build JAX-traceable prior and likelihood functions
         self._log_prior_fn = prior.log_prob_fn()
-        self._log_like_fn  = likelihood._make_log_likelihood(prior)
+        self._log_like_fn = likelihood._make_log_likelihood(prior)
 
         # BlackJAX NS algorithm
-        self._algo = _nss(
+        self._algo = _build_nss(
             logprior_fn=self._log_prior_fn,
             loglikelihood_fn=self._log_like_fn,
-            num_inner_steps=self.n_mcmc_steps,
-            num_delete=self.n_delete,
+            n_mcmc_steps=self.n_mcmc_steps,
+            n_delete=self.n_delete,
             max_shrinkage=max_shrinkage,
             max_steps=max_steps,
         )
@@ -203,13 +289,17 @@ class NestedSampler:
         """
         # Draw initial live points from the prior
         key, init_key = jax.random.split(key)
-        initial_particles = self.prior.sample_n(init_key, self.n_live)  # (n_live, n_params)
+        initial_particles = self.prior.sample_n(
+            init_key, self.n_live
+        )  # (n_live, n_params)
         state = self._algo.init(initial_particles)
 
         if self.verbose:
-            print(f"Nested sampling: {self.n_live} live points, "
-                  f"{self.n_mcmc_steps} MCMC steps/iter, "
-                  f"device: {jax.devices()[0]}")
+            print(
+                f"Nested sampling: {self.n_live} live points, "
+                f"{self.n_mcmc_steps} MCMC steps/iter, "
+                f"device: {jax.devices()[0]}"
+            )
 
         # JIT the kernel step for GPU performance.
         step = jax.jit(self._algo.step)
@@ -230,8 +320,8 @@ class NestedSampler:
             dead.append(dead_info)
             if pbar is not None:
                 pbar.update(self.n_delete)
-            logZ_live = float(state.integrator.logZ_live)
-            logZ      = float(state.integrator.logZ)
+            logZ_live = float(_ns_integrator(state).logZ_live)
+            logZ      = float(_ns_integrator(state).logZ)
             if not (logZ_live - logZ > self.term_dlogz):
                 break
 
@@ -239,7 +329,7 @@ class NestedSampler:
             pbar.close()
 
         if self.verbose:
-            print(f"\nlogZ = {float(state.integrator.logZ):.2f}")
+            print(f"\nlogZ = {float(_ns_integrator(state).logZ):.2f}")
 
         # Combine the per-iteration dead points with the final live points.
         # finalise() expects AdaptiveNSState (state), not the inner state.particles.
@@ -249,17 +339,17 @@ class NestedSampler:
         # the stochastic prior-volume shrinkage.  Marginalise for evidence and
         # average for a single weight per point.
         key, w_key = jax.random.split(key)
-        logw_mc = _bj_log_weights(w_key, dead_all)              # (n_points, n_mc)
-        logZs   = jax.scipy.special.logsumexp(logw_mc, axis=0)  # (n_mc,)
-        logZ    = float(logZs.mean())
-        logw    = logw_mc.mean(axis=-1)                         # (n_points,)
+        logw_mc = _bj_log_weights(w_key, dead_all)  # (n_points, n_mc)
+        logZs = jax.scipy.special.logsumexp(logw_mc, axis=0)  # (n_mc,)
+        logZ = float(logZs.mean())
+        logw = logw_mc.mean(axis=-1)  # (n_points,)
 
         if self.verbose:
-            print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
+            print(f"log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")  # noqa: E231
 
         # Per-parameter posterior samples.
-        # dead_all is NSInfo; positions live at dead_all.particles.position.
-        positions = dead_all.particles.position   # (n_points, n_params)
+        # dead_all is NSInfo; positions live at _dead_positions(dead_all).
+        positions = _dead_positions(dead_all)   # (n_points, n_params)
         samples = {
             name: positions[:, i]
             for i, name in enumerate(self.prior.names)
@@ -268,14 +358,14 @@ class NestedSampler:
         # Save chains in anesthetic dead-birth format.
         if self.outdir is not None:
             os.makedirs(self.outdir, exist_ok=True)
-            chains_dir = os.path.join(self.outdir, 'chains')
+            chains_dir = os.path.join(self.outdir, "chains")
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                logL       = np.asarray(dead_all.particles.loglikelihood)
-                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                logL       = np.asarray(_dead_logL(dead_all))
+                logL_birth = np.asarray(_dead_logL_birth(dead_all))
                 table = np.column_stack([np.asarray(positions), logL, logL_birth])
-                np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
-                with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
+                np.savetxt(os.path.join(chains_dir, "chains_dead-birth.txt"), table)
+                with open(os.path.join(chains_dir, "chains.paramnames"), "w") as f:
                     for name in self.prior.names:
                         f.write(f"{name}\t{name}\n")
                 if self.verbose:
@@ -296,8 +386,9 @@ class NestedSampler:
     # Plotting helpers
     # ------------------------------------------------------------------
 
-    def plot_corner(self, result: NSResult, truth: dict = None,
-                    filename: str = None, **kwargs):
+    def plot_corner(
+        self, result: NSResult, truth: dict = None, filename: str = None, **kwargs
+    ):
         """Make a corner plot using anesthetic.
 
         Parameters
@@ -310,58 +401,66 @@ class NestedSampler:
             Path to save the figure.  Defaults to ``{outdir}/corner.png``.
         """
         try:
-            from anesthetic import read_chains, make_2d_axes
             import matplotlib.pyplot as plt
+            from anesthetic import make_2d_axes, read_chains
         except ImportError:
-            raise ImportError("anesthetic and matplotlib are required for corner plots.\n"
-                              "pip install anesthetic matplotlib")
+            raise ImportError(
+                "anesthetic and matplotlib are required for corner plots.\n"
+                "pip install anesthetic matplotlib"
+            )
 
         chains_root = None
         if self.outdir is not None:
-            chains_root = os.path.join(self.outdir, 'chains', 'chains')
+            chains_root = os.path.join(self.outdir, "chains", "chains")
 
-        if chains_root is not None and os.path.exists(chains_root + '_dead-birth.txt'):
+        if chains_root is not None and os.path.exists(chains_root + "_dead-birth.txt"):
             samples = read_chains(chains_root, columns=self.prior.names)
         else:
             # Fall back: build NestedSamples from raw arrays
             from anesthetic import NestedSamples
+
             data = {n: np.array(result.samples[n]) for n in self.prior.names}
-            data['logL'] = np.array(result.dead.logL)
-            data['logL_birth'] = np.array(result.dead.logL_birth)
+            data["logL"] = np.array(_dead_logL(result.dead))
+            data["logL_birth"] = np.array(_dead_logL_birth(result.dead))
             samples = NestedSamples(
                 data=data,
-                logL='logL',
-                logL_birth='logL_birth',
+                logL="logL",
+                logL_birth="logL_birth",
                 columns=self.prior.names,
             )
 
-        fig, axes = make_2d_axes(self.prior.names,
-                                  figsize=(3 * self.prior.n_params,) * 2,
-                                  facecolor='w')
-        samples.plot_2d(axes, alpha=0.9, label='posterior', **kwargs)
+        fig, axes = make_2d_axes(
+            self.prior.names, figsize=(3 * self.prior.n_params,) * 2, facecolor="w"
+        )
+        samples.plot_2d(axes, alpha=0.9, label="posterior", **kwargs)
 
         if truth is not None:
             for i, name in enumerate(self.prior.names):
                 if name not in truth:
                     continue
                 tv = truth[name]
-                axes.iloc[i, i].axvline(tv, color='red', linestyle='--', linewidth=2)
+                axes.iloc[i, i].axvline(tv, color="red", linestyle="--", linewidth=2)
                 for j in range(i):
-                    axes.iloc[i, j].axhline(tv, color='red', linestyle='--',
-                                             linewidth=1, alpha=0.5)
+                    axes.iloc[i, j].axhline(
+                        tv, color="red", linestyle="--", linewidth=1, alpha=0.5
+                    )
                     if self.prior.names[j] in truth:
-                        axes.iloc[i, j].axvline(truth[self.prior.names[j]],
-                                                  color='red', linestyle='--',
-                                                  linewidth=1, alpha=0.5)
+                        axes.iloc[i, j].axvline(
+                            truth[self.prior.names[j]],
+                            color="red",
+                            linestyle="--",
+                            linewidth=1,
+                            alpha=0.5,
+                        )
 
-        plt.suptitle('Posterior', y=1.02)
+        plt.suptitle("Posterior", y=1.02)
         plt.tight_layout()
 
         if filename is None and self.outdir is not None:
-            filename = os.path.join(self.outdir, 'corner.png')
+            filename = os.path.join(self.outdir, "corner.png")
 
         if filename is not None:
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
+            plt.savefig(filename, dpi=150, bbox_inches="tight")
             if self.verbose:
                 print(f"Corner plot saved to {filename}")
 
@@ -462,11 +561,11 @@ class BatchedNestedSampler:
         )
         self._log_like_fn = self._log_like_batch_fn.indexed
 
-        self._algo = _nss(
+        self._algo = _build_nss(
             logprior_fn=self._log_prior_fn,
             loglikelihood_fn=self._log_like_fn,
-            num_inner_steps=self.n_mcmc_steps,
-            num_delete=self.n_delete,
+            n_mcmc_steps=self.n_mcmc_steps,
+            n_delete=self.n_delete,
             max_shrinkage=max_shrinkage,
             max_steps=max_steps,
         )
@@ -510,8 +609,8 @@ class BatchedNestedSampler:
             active_masks.append(active_before)
             iteration += 1
 
-            logZ_live = states.integrator.logZ_live
-            logZ = states.integrator.logZ
+            logZ_live = _ns_integrator(states).logZ_live
+            logZ = _ns_integrator(states).logZ
             converged = converged | ~(logZ_live - logZ > self.term_dlogz)
 
             if pbar is not None:
@@ -551,7 +650,7 @@ class BatchedNestedSampler:
         logZs = jax.scipy.special.logsumexp(logw_mc, axis=0)
         logZ = float(logZs.mean())
         logw = logw_mc.mean(axis=-1)
-        positions = dead_all.particles.position
+        positions = _dead_positions(dead_all)
         samples = {
             name: positions[:, i]
             for i, name in enumerate(self.prior.names)
@@ -567,8 +666,8 @@ class BatchedNestedSampler:
             chains_dir = os.path.join(self.outdir, safe_label, 'chains')
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                logL = np.asarray(dead_all.particles.loglikelihood)
-                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                logL = np.asarray(_dead_logL(dead_all))
+                logL_birth = np.asarray(_dead_logL_birth(dead_all))
                 table = np.column_stack([np.asarray(positions), logL, logL_birth])
                 np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
                 with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
@@ -656,11 +755,11 @@ class BatchedFluxDensityNestedSampler:
         )
         self._log_like_fn = batch_ll.indexed
 
-        self._algo = _nss(
+        self._algo = _build_nss(
             logprior_fn=self._log_prior_fn,
             loglikelihood_fn=self._log_like_fn,
-            num_inner_steps=self.n_mcmc_steps,
-            num_delete=self.n_delete,
+            n_mcmc_steps=self.n_mcmc_steps,
+            n_delete=self.n_delete,
             max_shrinkage=max_shrinkage,
             max_steps=max_steps,
         )
@@ -701,8 +800,8 @@ class BatchedFluxDensityNestedSampler:
             active_masks.append(active_before)
             iteration += 1
 
-            logZ_live = states.integrator.logZ_live
-            logZ      = states.integrator.logZ
+            logZ_live = _ns_integrator(states).logZ_live
+            logZ      = _ns_integrator(states).logZ
             converged = converged | ~(logZ_live - logZ > self.term_dlogz)
 
             if pbar is not None:
@@ -739,7 +838,7 @@ class BatchedFluxDensityNestedSampler:
         logZs    = jax.scipy.special.logsumexp(logw_mc, axis=0)
         logZ     = float(logZs.mean())
         logw     = logw_mc.mean(axis=-1)
-        positions = dead_all.particles.position
+        positions = _dead_positions(dead_all)
         samples   = {name: positions[:, i] for i, name in enumerate(self.prior.names)}
         sn_name   = self.dataset.names[batch_idx]
 
@@ -757,8 +856,8 @@ class BatchedFluxDensityNestedSampler:
             chains_dir = os.path.join(outdir_sn, 'chains')
             os.makedirs(chains_dir, exist_ok=True)
             try:
-                logL       = np.asarray(dead_all.particles.loglikelihood)
-                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                logL       = np.asarray(_dead_logL(dead_all))
+                logL_birth = np.asarray(_dead_logL_birth(dead_all))
                 table = np.column_stack([np.asarray(positions), logL, logL_birth])
                 np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
                 with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:

@@ -135,6 +135,25 @@ Available models
   Note: parameter is ``log10_l0`` (not ``l0``), because the linear value
   (~10⁴³ erg/s) overflows float32.
 
+- ``tde_fallback_bolometric`` — Guillochon/MOSFiT fallback tables with viscous processing
+
+**Afterglows**
+
+- ``tophat_redback``
+- ``gaussian_redback``
+- ``twocomponent_redback``
+- ``powerlaw_redback``
+- ``alternativepowerlaw_redback``
+- ``doublegaussian_redback``
+
+  Append ``_refreshed`` to any of these names for the native refreshed-shell
+  variant, which additionally takes ``g1``, ``et``, and ``s1``.
+
+  These native Redback models accept observer-frame ``frequency`` in Hz and
+  return mJy with ``output_format="flux_density"`` or AB magnitude with
+  ``output_format="magnitude"``. The ``res`` and ``steps`` arguments are
+  static JAX compilation settings.
+
 **Shock-powered**
 
 - ``shock_cooling_bolometric`` — Piro 2021
@@ -150,7 +169,8 @@ Available models
 - ``metzger_kilonova_bolometric`` — r-process ODE, 200-shell (Metzger 2017)
 - ``magnetar_boosted_kilonova_bolometric`` — r-process + magnetar injection
 
-All models are ``@jax.jit`` compiled and support ``jax.grad`` and ``jax.vmap``.
+Model kernels are JIT compiled, and supported paths compose with ``jax.grad``
+and ``jax.vmap`` for rapid repeated analyses.
 
 Next steps
 ----------

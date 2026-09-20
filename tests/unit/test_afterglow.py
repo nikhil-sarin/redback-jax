@@ -2,7 +2,6 @@
 Tests for redback_jax.models.afterglow_models — numerical match
 against redback's tophat_redback.
 """
-import sys
 import numpy as np
 import pytest
 import jax
@@ -10,7 +9,6 @@ import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
-sys.path.insert(0, "/home/nikhilsarin/projects/redback")
 
 from redback_jax.models.afterglow_models import tophat_redback
 
@@ -26,6 +24,7 @@ def _redback_tophat(time, redshift, thv, loge0, thc, logn0, p,
 
     redback ignores any dl kwarg and computes it internally from Planck18.
     """
+    pytest.importorskip("redback")
     from redback.transient_models.afterglow_models.base_models import tophat_redback as rb_tophat
 
     result = rb_tophat(
@@ -75,7 +74,7 @@ def test_tophat_onaxis_radio():
     ref = _redback_tophat(time, **PARAMS, frequency=freq, dl=DL_CM,
                            res=100, steps=250)
     out = np.array(tophat_redback(
-        jnp.array(time), **PARAMS, frequency=jnp.array(freq), dl=DL_CM,
+        jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=100, steps=250,
     ))
 
@@ -100,7 +99,7 @@ def test_tophat_offaxis_optical():
                            res=100, steps=250)
     out = np.array(tophat_redback(
         jnp.array(time), **params_offaxis,
-        frequency=jnp.array(freq), dl=DL_CM,
+        frequency=jnp.array(freq),
         res=100, steps=250,
     ))
 
@@ -122,7 +121,7 @@ def test_tophat_multiband():
     ref = _redback_tophat(time, **PARAMS, frequency=freq, dl=DL_CM,
                            res=100, steps=250)
     out = np.array(tophat_redback(
-        jnp.array(time), **PARAMS, frequency=jnp.array(freq), dl=DL_CM,
+        jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=100, steps=250,
     ))
 
@@ -140,7 +139,7 @@ def test_tophat_positive_finite():
     time = np.geomspace(0.1, 100.0, 10)
     freq = np.full(len(time), 5e9)
     out = np.array(tophat_redback(
-        jnp.array(time), **PARAMS, frequency=jnp.array(freq), dl=DL_CM,
+        jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=30, steps=100,
     ))
     assert np.all(np.isfinite(out)), "Non-finite values"
@@ -155,11 +154,11 @@ def test_tophat_jit_stable():
     time = np.array([1.0, 10.0, 100.0])
     freq = np.full(3, 5e9)
     a = np.array(tophat_redback(
-        jnp.array(time), **PARAMS, frequency=jnp.array(freq), dl=DL_CM,
+        jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=30, steps=100,
     ))
     b = np.array(tophat_redback(
-        jnp.array(time), **PARAMS, frequency=jnp.array(freq), dl=DL_CM,
+        jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=30, steps=100,
     ))
     np.testing.assert_array_equal(a, b)

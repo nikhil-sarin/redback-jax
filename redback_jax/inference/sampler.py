@@ -6,14 +6,16 @@ BlackJAX's nested sampling and MCMC algorithms, following the style of
 JAX-bandflux and redback's sampler API.
 """
 
+import warnings
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-from typing import Dict, Callable, Optional, Tuple, Any, NamedTuple
-from functools import partial
 
 try:
     import blackjax
+
     HAS_BLACKJAX = True
 except ImportError:
     HAS_BLACKJAX = False
@@ -21,6 +23,7 @@ except ImportError:
 
 try:
     import anesthetic
+
     HAS_ANESTHETIC = True
 except ImportError:
     HAS_ANESTHETIC = False
@@ -44,6 +47,7 @@ class SamplerResult(NamedTuple):
     metadata : dict
         Additional metadata from the sampling run
     """
+
     samples: Dict[str, jnp.ndarray]
     log_likelihoods: jnp.ndarray
     log_weights: jnp.ndarray
@@ -85,7 +89,7 @@ def create_gaussian_likelihood(
     model_fn: Callable[[Dict[str, float]], jnp.ndarray],
     observed_data: jnp.ndarray,
     errors: jnp.ndarray,
-    reduce_fn: Optional[Callable] = None
+    reduce_fn: Optional[Callable] = None,
 ) -> Callable[[Dict[str, float]], float]:
     """Create a Gaussian likelihood function.
 
@@ -105,6 +109,7 @@ def create_gaussian_likelihood(
     callable
         Log-likelihood function
     """
+
     @jax.jit
     def loglikelihood(params: Dict[str, float]) -> float:
         model = model_fn(params)
@@ -128,13 +133,22 @@ def run_nested_sampling(
     num_mcmc_steps: int = 20,
     max_iterations: int = 100,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    target_ess: float = 0.5,
+    step_size: float = 0.1,
 ) -> SamplerResult:
-    """Run Sequential Monte Carlo (SMC) sampling using BlackJAX.
+    """Run adaptive tempered Sequential Monte Carlo (SMC) using BlackJAX.
 
-    This uses adaptive tempered SMC which provides evidence estimates similar
-    to nested sampling. The algorithm gradually increases the temperature from
-    the prior to the posterior while tracking the normalizing constant.
+    Particles start at the prior and are annealed to the posterior over a
+    sequence of temperatures chosen adaptively to hold the effective sample
+    size near ``target_ess * n_particles``; each step mutates the particles
+    with NUTS. The log evidence is the sum of the per-step log-likelihood
+    increments.
+
+    Sampling happens in an unconstrained space: each parameter is mapped to the
+    real line with a logit transform, under which a uniform prior on the
+    parameter is exactly a standard logistic prior. This keeps the target
+    smooth for NUTS instead of the hard -inf walls of a bounded uniform.
 
     Parameters
     ----------
@@ -145,18 +159,23 @@ def run_nested_sampling(
     n_particles : int, optional
         Number of particles (default: 500)
     num_mcmc_steps : int, optional
-        Number of MCMC steps per iteration (default: 20)
+        NUTS steps used to mutate particles per temperature (default: 20)
     max_iterations : int, optional
         Maximum number of temperature steps (default: 100)
     rng_key : jax.Array, optional
         JAX random key (default: None, will create one)
     verbose : bool, optional
         Print progress information (default: True)
+    target_ess : float, optional
+        Effective sample size to hold, as a fraction of n_particles
+        (default: 0.5)
+    step_size : float, optional
+        NUTS step size in the unconstrained space (default: 0.1)
 
     Returns
     -------
     SamplerResult
-        Results from the SMC sampling run with evidence estimate
+        Equally-weighted posterior samples and the evidence estimate.
 
     Raises
     ------
@@ -165,93 +184,127 @@ def run_nested_sampling(
     """
     if not HAS_BLACKJAX:
         raise ImportError(
-            "blackjax is required for sampling. "
-            "Install with: pip install blackjax"
+            "blackjax is required for sampling. " "Install with: pip install blackjax"
         )
+
+    from blackjax.smc import resampling
 
     if rng_key is None:
         rng_key = jax.random.PRNGKey(42)
 
-    # Get parameter names and dimensions
     param_names = list(prior_bounds.keys())
     n_params = len(param_names)
+    lows = jnp.array([prior_bounds[name][0] for name in param_names])
+    highs = jnp.array([prior_bounds[name][1] for name in param_names])
 
-    # Create prior transform
-    prior_fn = create_uniform_prior(prior_bounds)
+    def to_params(z: jax.Array) -> jax.Array:
+        """Unconstrained z -> bounded parameter vector."""
+        return lows + jax.nn.sigmoid(z) * (highs - lows)
 
-    # Create log probability function that works with arrays
-    def logprior_fn(u: jax.Array) -> float:
-        """Log prior in unit hypercube."""
-        in_bounds = jnp.all((u >= 0) & (u <= 1))
-        return jnp.where(in_bounds, 0.0, -jnp.inf)
+    def logprior_fn(z: jax.Array) -> float:
+        """Standard logistic prior: the logit-transform Jacobian of a uniform."""
+        return jnp.sum(jax.nn.log_sigmoid(z) + jax.nn.log_sigmoid(-z))
 
-    def loglikelihood_array(u: jax.Array) -> float:
-        """Likelihood function (takes unit hypercube)."""
-        params = prior_fn(u)
-        return loglikelihood_fn(params)
+    def loglikelihood_array(z: jax.Array) -> float:
+        theta = to_params(z)
+        return loglikelihood_fn({name: theta[i] for i, name in enumerate(param_names)})
 
-    # Initialize particles uniformly in unit hypercube
+    # Draw the prior directly: uniform in the parameter <=> standard logistic in z.
     rng_key, init_key = jax.random.split(rng_key)
-    initial_particles = jax.random.uniform(init_key, shape=(n_particles, n_params))
+    initial_particles = jax.random.logistic(init_key, shape=(n_particles, n_params))
 
-    # Use NUTS as the mutation kernel for SMC
-    def mcmc_parameter_update(rng_key, state, tempered_logposterior_fn):
-        """Update parameters using NUTS."""
-        nuts = blackjax.nuts(tempered_logposterior_fn, step_size=0.1)
-        nuts_state = nuts.init(state.particles)
+    smc = blackjax.adaptive_tempered_smc(
+        logprior_fn=logprior_fn,
+        loglikelihood_fn=loglikelihood_array,
+        mcmc_step_fn=blackjax.nuts.build_kernel(),
+        mcmc_init_fn=blackjax.nuts.init,
+        # blackjax treats a leading dim of 1 as "shared across all particles".
+        mcmc_parameters={
+            "step_size": jnp.array([step_size]),
+            "inverse_mass_matrix": jnp.ones((1, n_params)),
+        },
+        resampling_fn=resampling.systematic,
+        target_ess=target_ess,
+        num_mcmc_steps=num_mcmc_steps,
+    )
 
-        def one_mcmc_step(carry, _):
-            nuts_state, rng_key = carry
-            rng_key, step_key = jax.random.split(rng_key)
-            nuts_state, _ = nuts.step(step_key, nuts_state)
-            return (nuts_state, rng_key), None
+    state = smc.init(initial_particles)
+    step = jax.jit(smc.step)
+    batch_loglike = jax.jit(jax.vmap(loglikelihood_array))
 
-        (final_nuts_state, _), _ = jax.lax.scan(
-            one_mcmc_step, (nuts_state, rng_key), None, length=num_mcmc_steps
+    if verbose:
+        print(
+            f"Starting adaptive tempered SMC: {n_particles} particles, "
+            f"{num_mcmc_steps} NUTS steps/temperature"
         )
-        return final_nuts_state.position
 
-    # Simple SMC approach: sample from prior, evaluate likelihood
-    # This is a simplified version without full SMC machinery
+    log_evidence = 0.0
+    # Per-step relative variance of the reweighting, accumulated for the
+    # evidence error (see below).
+    rel_var = 0.0
+    n_steps = 0
+    while state.tempering_param < 1.0 and n_steps < max_iterations:
+        # Incremental weights for this step use the likelihood at the current
+        # particles, so evaluate before the state is mutated.
+        loglike_now = batch_loglike(state.particles)
+        lam_prev = state.tempering_param
+
+        rng_key, step_key = jax.random.split(rng_key)
+        state, info = step(step_key, state)
+        log_evidence += float(info.log_likelihood_increment)
+        n_steps += 1
+
+        d_lam = float(state.tempering_param) - float(lam_prev)
+        logw = d_lam * loglike_now
+        logw = logw - jax.scipy.special.logsumexp(logw)
+        ess = float(1.0 / jnp.sum(jnp.exp(2.0 * logw)))
+        rel_var += 1.0 / ess - 1.0 / n_particles
+
+        if verbose:
+            print(
+                f"  step {n_steps}: lambda={float(state.tempering_param):.4f} "  # noqa: E231,E501
+                f"ess={ess:.1f} logZ={log_evidence:.3f}"  # noqa: E231
+            )
+
+    if state.tempering_param < 1.0:
+        temp = float(state.tempering_param)
+        msg = (
+            f"SMC stopped at temperature {temp} after {max_iterations} "
+            "iterations before reaching the posterior. "
+            "Raise max_iterations or n_particles."
+        )
+        warnings.warn(
+            msg,
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # Var(log Z) ~ sum of the per-step relative variances of the reweighting
+    # (delta method, treating the steps as independent) -- an approximation.
+    # Clamp: rounding can drive rel_var slightly negative and NaN the sqrt.
+    log_evidence_error = float(jnp.sqrt(jnp.maximum(0.0, rel_var)))
+
+    # Particles are equally weighted after resampling, so these are posterior
+    # samples directly -- no importance weights left to apply.
+    final_params = jax.vmap(to_params)(state.particles)
+    samples_dict = {name: final_params[:, i] for i, name in enumerate(param_names)}
+    log_likes = batch_loglike(state.particles)
+    log_weights = jnp.full((n_particles,), -jnp.log(n_particles))
+
     if verbose:
-        print(f"Starting SMC sampling with {n_particles} particles...")
+        print(
+            f"Estimated log evidence: {log_evidence:.4f} +/- {log_evidence_error:.4f}"  # noqa: E231,E501
+        )
 
-    # Evaluate likelihood for all particles
-    def eval_particle(u):
-        return loglikelihood_array(u)
-
-    log_likes = jax.vmap(eval_particle)(initial_particles)
-
-    if verbose:
-        print(f"Evaluated {n_particles} particles from prior")
-
-    # Convert to parameter space
-    samples_dict = {}
-    for i, name in enumerate(param_names):
-        values = []
-        for p in initial_particles:
-            values.append(prior_fn(p)[name])
-        samples_dict[name] = jnp.array(values)
-
-    # Compute importance weights based on likelihood
-    # log_weights = log_likelihood (since we sample from prior)
-    log_weights = log_likes - jax.scipy.special.logsumexp(log_likes)
-
-    # Estimate log evidence: mean likelihood under prior
-    # log Z = log E_prior[likelihood] ≈ log(sum(likelihood)/N)
-    log_evidence = jax.scipy.special.logsumexp(log_likes) - jnp.log(n_particles)
-    log_evidence_error = jnp.std(log_likes) / jnp.sqrt(n_particles)
-
-    if verbose:
-        print(f"Estimated log evidence: {log_evidence:.4f} +/- {log_evidence_error:.4f}")
-
-    # Prepare metadata
     metadata = {
-        'n_particles': n_particles,
-        'n_samples': n_particles,
-        'param_names': param_names,
-        'prior_bounds': prior_bounds,
-        'method': 'importance_sampling'
+        "n_particles": n_particles,
+        "n_samples": n_particles,
+        "param_names": param_names,
+        "prior_bounds": prior_bounds,
+        "method": "adaptive_tempered_smc",
+        "n_tempering_steps": n_steps,
+        "target_ess": target_ess,
+        "final_temperature": float(state.tempering_param),
     }
 
     return SamplerResult(
@@ -259,8 +312,8 @@ def run_nested_sampling(
         log_likelihoods=log_likes,
         log_weights=log_weights,
         log_evidence=float(log_evidence),
-        log_evidence_error=float(log_evidence_error),
-        metadata=metadata
+        log_evidence_error=log_evidence_error,
+        metadata=metadata,
     )
 
 
@@ -272,7 +325,7 @@ def run_mcmc(
     n_chains: int = 4,
     step_size: float = 0.01,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> SamplerResult:
     """Run MCMC sampling using BlackJAX's NUTS sampler.
 
@@ -307,8 +360,7 @@ def run_mcmc(
     """
     if not HAS_BLACKJAX:
         raise ImportError(
-            "blackjax is required for sampling. "
-            "Install with: pip install blackjax"
+            "blackjax is required for sampling. " "Install with: pip install blackjax"
         )
 
     if rng_key is None:
@@ -336,8 +388,10 @@ def run_mcmc(
     # Initialize chains
     rng_key, init_key = jax.random.split(rng_key)
     initial_positions = jax.random.uniform(
-        init_key, shape=(n_chains, n_params),
-        minval=0.1, maxval=0.9  # Start away from boundaries
+        init_key,
+        shape=(n_chains, n_params),
+        minval=0.1,
+        maxval=0.9,  # Start away from boundaries
     )
 
     # Define one step
@@ -379,30 +433,28 @@ def run_mcmc(
     # Convert to parameter space
     samples_dict = {}
     for i, name in enumerate(param_names):
-        samples_dict[name] = jnp.array([
-            prior_fn(s)[name] for s in all_samples
-        ])
+        samples_dict[name] = jnp.array([prior_fn(s)[name] for s in all_samples])
 
     # Equal weights for MCMC
     n_total = len(all_loglikes)
     log_weights = jnp.zeros(n_total)
 
     metadata = {
-        'n_samples': n_samples,
-        'n_warmup': n_warmup,
-        'n_chains': n_chains,
-        'total_samples': n_total,
-        'param_names': param_names,
-        'prior_bounds': prior_bounds
+        "n_samples": n_samples,
+        "n_warmup": n_warmup,
+        "n_chains": n_chains,
+        "total_samples": n_total,
+        "param_names": param_names,
+        "prior_bounds": prior_bounds,
     }
 
     return SamplerResult(
         samples=samples_dict,
         log_likelihoods=jnp.array(all_loglikes),
         log_weights=log_weights,
-        log_evidence=float('nan'),  # MCMC doesn't compute evidence
-        log_evidence_error=float('nan'),
-        metadata=metadata
+        log_evidence=float("nan"),  # MCMC doesn't compute evidence
+        log_evidence_error=float("nan"),
+        metadata=metadata,
     )
 
 
@@ -413,7 +465,7 @@ def fit_transient(
     sampler: str = "nested",
     sampler_kwargs: Optional[Dict] = None,
     rng_key: Optional[jax.Array] = None,
-    verbose: bool = True
+    verbose: bool = True,
 ) -> SamplerResult:
     """Fit a transient model to observational data.
 
@@ -480,14 +532,19 @@ def fit_transient(
     >>> print(f"Log evidence: {result.log_evidence:.2f}")
     """
     # Extract observational data
-    if hasattr(transient, 'magnitudes') and transient.magnitudes is not None:
+    if hasattr(transient, "magnitudes") and transient.magnitudes is not None:
         observed_data = jnp.asarray(transient.magnitudes)
         errors = jnp.asarray(transient.magnitude_errors)
-    elif hasattr(transient, 'fluxes') and transient.fluxes is not None:
+    elif hasattr(transient, "fluxes") and transient.fluxes is not None:
         observed_data = jnp.asarray(transient.fluxes)
         errors = jnp.asarray(transient.flux_errors)
+    elif hasattr(transient, "flux_densities") and transient.flux_densities is not None:
+        observed_data = jnp.asarray(transient.flux_densities)
+        errors = jnp.asarray(transient.flux_density_errors)
     else:
-        raise ValueError("Transient must have magnitudes or fluxes data")
+        raise ValueError(
+            "Transient must have magnitudes, fluxes, or flux_densities data"
+        )
 
     # Create likelihood function
     likelihood_fn = create_gaussian_likelihood(model_fn, observed_data, errors)
@@ -503,7 +560,7 @@ def fit_transient(
             prior_bounds,
             rng_key=rng_key,
             verbose=verbose,
-            **sampler_kwargs
+            **sampler_kwargs,
         )
     elif sampler == "mcmc":
         result = run_mcmc(
@@ -511,7 +568,7 @@ def fit_transient(
             prior_bounds,
             rng_key=rng_key,
             verbose=verbose,
-            **sampler_kwargs
+            **sampler_kwargs,
         )
     else:
         raise ValueError(f"Unknown sampler: {sampler}. Use 'nested' or 'mcmc'.")
@@ -538,11 +595,12 @@ def to_anesthetic_samples(result: SamplerResult):
         If anesthetic is not installed
     """
     if not HAS_ANESTHETIC:
-        raise ImportError("anesthetic is required for this function. "
-                          "Install with: pip install anesthetic")
+        raise ImportError(
+            "anesthetic is required for this function. "
+            "Install with: pip install anesthetic"
+        )
 
-    param_names = result.metadata['param_names']
-    n_samples = len(result.log_likelihoods)
+    param_names = result.metadata["param_names"]
 
     # Create DataFrame with samples
     data = {}
@@ -550,22 +608,17 @@ def to_anesthetic_samples(result: SamplerResult):
         data[name] = np.array(result.samples[name])
 
     # Add log-likelihood
-    data['logL'] = np.array(result.log_likelihoods)
+    data["logL"] = np.array(result.log_likelihoods)
 
     # Create anesthetic samples
     if np.isfinite(result.log_evidence):
         # Nested sampling result
         samples = anesthetic.NestedSamples(
-            data=data,
-            columns=param_names + ['logL'],
-            logL='logL'
+            data=data, columns=param_names + ["logL"], logL="logL"
         )
     else:
         # MCMC result
-        samples = anesthetic.Samples(
-            data=data,
-            columns=param_names + ['logL']
-        )
+        samples = anesthetic.Samples(data=data, columns=param_names + ["logL"])
 
     return samples
 
@@ -585,16 +638,16 @@ def summarize_result(result: SamplerResult) -> Dict[str, Dict[str, float]]:
     """
     summary = {}
 
-    for name in result.metadata['param_names']:
+    for name in result.metadata["param_names"]:
         samples = result.samples[name]
         summary[name] = {
-            'mean': float(jnp.mean(samples)),
-            'std': float(jnp.std(samples)),
-            'median': float(jnp.median(samples)),
-            'q16': float(jnp.percentile(samples, 16)),
-            'q84': float(jnp.percentile(samples, 84)),
-            'q05': float(jnp.percentile(samples, 5)),
-            'q95': float(jnp.percentile(samples, 95)),
+            "mean": float(jnp.mean(samples)),
+            "std": float(jnp.std(samples)),
+            "median": float(jnp.median(samples)),
+            "q16": float(jnp.percentile(samples, 16)),
+            "q84": float(jnp.percentile(samples, 84)),
+            "q05": float(jnp.percentile(samples, 5)),
+            "q95": float(jnp.percentile(samples, 95)),
         }
 
     return summary

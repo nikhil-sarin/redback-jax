@@ -1,0 +1,534 @@
+"""Composed light-curve engine for the native Redback afterglow family."""
+
+import math
+from functools import partial
+
+import jax.numpy as jnp
+from jax import jit, tree_util, vmap
+from jax.scipy.special import logsumexp
+
+from redback_jax.constants import day_to_s
+
+from .dynamics import (
+    _adiabatic_index,
+    arbitrary_csm_impulsive_dynamics,
+    legacy_impulsive_dynamics,
+    legacy_refreshed_dynamics,
+    powered_thin_shell_dynamics,
+)
+from .geometry import (
+    angular_mesh,
+    angular_patch_coordinates,
+    observer_angle,
+    observer_angle_patches,
+)
+from .radiation import forward_shock_state, observer_state, synchrotron_log_flux
+from .radiation import reverse_observer_state, reverse_shock_state
+from .reverse_shock import unmagnetized_reverse_shock_dynamics
+from .structure import jet_structure
+
+
+def _legacy_power_law_profile(log10_radius, parameters):
+    log10_coefficient, density_index = parameters
+    return log10_coefficient - density_index * log10_radius
+
+
+_P_GRID = jnp.array([1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.7, 3.0, 3.2, 3.4])
+_SPECTRAL_PEAK = jnp.array(
+    [3.0, 1.4, 1.1, 0.86, 0.725, 0.637, 0.579, 0.520, 0.487, 0.451, 0.434, 0.420]
+)
+_PEAK_FLUX = jnp.array(
+    [0.41, 0.44, 0.48, 0.53, 0.56, 0.59, 0.612, 0.630, 0.641, 0.659, 0.660, 0.675]
+)
+
+
+def _log10_linear_interpolate(x, xp, log10_yp):
+    """Linear interpolation of positive values represented in log10 space."""
+    upper = jnp.clip(jnp.searchsorted(xp, x, side="right"), 1, xp.size - 1)
+    lower = upper - 1
+    weight = jnp.clip((x - xp[lower]) / (xp[upper] - xp[lower]), 0.0, 1.0)
+    low = log10_yp[lower]
+    high = log10_yp[upper]
+    scale = jnp.maximum(low, high)
+    mixed = scale + jnp.log10(
+        (1.0 - weight) * jnp.power(10.0, low - scale)
+        + weight * jnp.power(10.0, high - scale)
+    )
+    return jnp.where(
+        x <= xp[0], log10_yp[0], jnp.where(x >= xp[-1], log10_yp[-1], mixed)
+    )
+
+
+@partial(
+    jit,
+    static_argnames=(
+        "structure_kind",
+        "resolution",
+        "steps",
+        "expansion",
+        "refreshed",
+        "density_function",
+        "engine_function",
+        "structure_function",
+        "radiation_function",
+        "reverse_shock",
+        "reverse_radiation_function",
+    ),
+)
+def native_afterglow_flux_density(
+    time,
+    frequency,
+    redshift,
+    theta_observer,
+    log10_energy,
+    theta_core,
+    theta_jet,
+    log10_density,
+    electron_index,
+    log10_epsilon_e,
+    log10_epsilon_b,
+    gamma_initial,
+    accelerated_fraction,
+    log10_luminosity_distance,
+    structure_kind="tophat",
+    structure_energy=0.01,
+    structure_gamma=0.5,
+    density_index=0.0,
+    expansion=True,
+    expansion_index=1.0,
+    resolution=50,
+    steps=250,
+    refreshed=False,
+    gamma_injection=2.0,
+    energy_factor=1.0,
+    injection_index=0.0,
+    density_function=None,
+    density_parameters=None,
+    log10_swept_mass_initial=None,
+    engine_function=None,
+    engine_parameters=None,
+    gamma_engine=1000.0,
+    structure_function=None,
+    structure_parameters=None,
+    radiation_function=None,
+    radiation_parameters=None,
+    phi_observer=0.0,
+    reverse_shock=False,
+    engine_duration=100.0,
+    reverse_electron_index=None,
+    reverse_log10_epsilon_e=None,
+    reverse_log10_epsilon_b=None,
+    reverse_accelerated_fraction=None,
+    reverse_radiation_function=None,
+    reverse_radiation_parameters=None,
+):
+    """Evaluate a native Redback-style afterglow in mJy.
+
+    ``time`` is observer-frame days and ``frequency`` is observer-frame Hz.
+    The luminosity distance is supplied as ``log10(cm)`` to remain float32-safe.
+    """
+    time = jnp.atleast_1d(time)
+    frequency = jnp.broadcast_to(frequency, time.shape)
+    solid_angle, theta_grid, phi_grid = angular_mesh(theta_jet, resolution=resolution)
+    if structure_function is None:
+        gamma_element, energy_fraction = jet_structure(
+            theta_grid,
+            gamma_initial,
+            1.0,
+            theta_core,
+            theta_jet,
+            structure_kind,
+            structure_energy,
+            structure_gamma,
+        )
+        element_theta = theta_grid
+        patch_theta = None
+        patch_phi = None
+    else:
+        patch_theta, patch_phi = angular_patch_coordinates(theta_grid, phi_grid)
+        gamma_element, energy_fraction = structure_function(
+            patch_theta,
+            patch_phi,
+            gamma_initial,
+            theta_core,
+            theta_jet,
+            structure_parameters,
+        )
+        element_theta = patch_theta
+    gamma_element = jnp.broadcast_to(gamma_element, element_theta.shape)
+    energy_fraction = jnp.broadcast_to(energy_fraction, element_theta.shape)
+    floating_dtype = jnp.result_type(time, 1.0)
+    energy_fraction = jnp.maximum(energy_fraction, jnp.finfo(floating_dtype).tiny)
+    element_log10_energy = log10_energy + jnp.log10(energy_fraction)
+    legacy_log10_density = jnp.where(
+        density_index == 2.0, log10_density + math.log10(3.0e35), log10_density
+    )
+    radius_override = None
+    local_density_override = None
+    reverse_dynamics = None
+    if reverse_shock:
+        if refreshed or engine_function is not None:
+            raise ValueError(
+                "reverse-shock dynamics cannot be combined with the refreshed or "
+                "thin-shell engine backends"
+            )
+        active_density_function = (
+            _legacy_power_law_profile if density_function is None else density_function
+        )
+        active_density_parameters = (
+            (legacy_log10_density, density_index)
+            if density_function is None
+            else density_parameters
+        )
+        if log10_swept_mass_initial is None:
+            if density_function is None:
+                initial_mass = (
+                    math.log10(4.0 * math.pi)
+                    - jnp.log10(3.0 - density_index)
+                    + legacy_log10_density
+                    + (3.0 - density_index) * 10.0
+                    + math.log10(1.67262192369e-24)
+                )
+            else:
+                density_at_minimum = active_density_function(
+                    10.0, active_density_parameters
+                )
+                initial_mass = (
+                    math.log10(4.0 * math.pi / 3.0)
+                    + math.log10(1.67262192369e-24)
+                    + density_at_minimum
+                    + 30.0
+                )
+        else:
+            initial_mass = log10_swept_mass_initial
+        reverse_dynamics = unmagnetized_reverse_shock_dynamics(
+            gamma_element,
+            element_log10_energy,
+            engine_duration,
+            active_density_parameters,
+            initial_mass,
+            active_density_function,
+            steps=steps,
+        )
+        gamma = reverse_dynamics.bulk_gamma
+        gamma_minus_one = gamma - 1.0
+        log10_mass = reverse_dynamics.log10_forward_mass
+        adiabatic_index = _adiabatic_index(gamma_minus_one)
+        radius_override = reverse_dynamics.radius
+        local_density_override = active_density_function(
+            jnp.log10(radius_override), active_density_parameters
+        )
+    elif engine_function is not None:
+        if refreshed:
+            raise ValueError("continuous and refreshed injection cannot be combined")
+        active_density_function = (
+            _legacy_power_law_profile if density_function is None else density_function
+        )
+        active_density_parameters = (
+            (legacy_log10_density, density_index)
+            if density_function is None
+            else density_parameters
+        )
+        if log10_swept_mass_initial is None:
+            if density_function is None:
+                initial_mass = (
+                    math.log10(4.0 * math.pi)
+                    - jnp.log10(3.0 - density_index)
+                    + legacy_log10_density
+                    + (3.0 - density_index) * 10.0
+                    + math.log10(1.67262192369e-24)
+                )
+            else:
+                density_at_minimum = density_function(10.0, density_parameters)
+                initial_mass = (
+                    math.log10(4.0 * math.pi / 3.0)
+                    + math.log10(1.67262192369e-24)
+                    + density_at_minimum
+                    + 30.0
+                )
+        else:
+            initial_mass = log10_swept_mass_initial
+        (
+            gamma,
+            gamma_minus_one,
+            log10_mass,
+            adiabatic_index,
+            radius_override,
+            local_density_override,
+            _,
+            _,
+        ) = powered_thin_shell_dynamics(
+            gamma_element,
+            element_log10_energy,
+            active_density_parameters,
+            initial_mass,
+            active_density_function,
+            engine_parameters,
+            engine_function,
+            log10_engine_scale=jnp.log10(energy_fraction),
+            gamma_engine=gamma_engine,
+            steps=steps,
+        )
+    elif density_function is not None:
+        if refreshed:
+            raise ValueError(
+                "arbitrary CSM is not yet supported with refreshed dynamics"
+            )
+        density_at_minimum = density_function(10.0, density_parameters)
+        default_initial_mass = (
+            math.log10(4.0 * math.pi / 3.0)
+            + math.log10(1.67262192369e-24)
+            + density_at_minimum
+            + 30.0
+        )
+        initial_mass = (
+            default_initial_mass
+            if log10_swept_mass_initial is None
+            else log10_swept_mass_initial
+        )
+        (
+            gamma,
+            gamma_minus_one,
+            log10_mass,
+            adiabatic_index,
+            radius_override,
+            local_density_override,
+        ) = arbitrary_csm_impulsive_dynamics(
+            gamma_element,
+            element_log10_energy,
+            density_parameters,
+            initial_mass,
+            density_function,
+            steps=steps,
+        )
+    elif refreshed:
+        element_log10_energy_maximum = (
+            jnp.log10(energy_factor) + log10_energy + 2.0 * jnp.log10(energy_fraction)
+        )
+        gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_refreshed_dynamics(
+            gamma_element,
+            gamma_injection,
+            element_log10_energy,
+            element_log10_energy_maximum,
+            injection_index,
+            legacy_log10_density,
+            density_index=density_index,
+            steps=steps,
+        )
+    else:
+        gamma, gamma_minus_one, log10_mass, adiabatic_index = legacy_impulsive_dynamics(
+            gamma_element,
+            element_log10_energy,
+            legacy_log10_density,
+            density_index=density_index,
+            steps=steps,
+        )
+
+    spectral_peak = jnp.interp(electron_index, _P_GRID, _SPECTRAL_PEAK)
+    peak_flux_factor = jnp.interp(electron_index, _P_GRID, _PEAK_FLUX)
+    azimuth_step = 2.0 * jnp.pi / resolution
+    latitude_step = theta_jet / resolution
+
+    def make_forward_state(g, u, lm, th, gh, radius, local_density):
+        return forward_shock_state(
+            g,
+            u,
+            lm,
+            electron_index,
+            spectral_peak,
+            peak_flux_factor,
+            jnp.power(10.0, log10_epsilon_b),
+            jnp.power(10.0, log10_epsilon_e),
+            legacy_log10_density,
+            density_index,
+            th,
+            gh,
+            azimuth_step,
+            latitude_step,
+            accelerated_fraction,
+            expansion,
+            expansion_index,
+            resolution,
+            radius,
+            local_density,
+        )
+
+    if radius_override is None:
+        shocks = vmap(
+            lambda g, u, lm, th, gh: make_forward_state(g, u, lm, th, gh, None, None)
+        )(gamma, gamma_minus_one, log10_mass, element_theta, adiabatic_index)
+    elif radius_override.ndim == 1:
+        shocks = vmap(
+            lambda g, u, lm, th, gh: make_forward_state(
+                g,
+                u,
+                lm,
+                th,
+                gh,
+                radius_override,
+                local_density_override,
+            )
+        )(gamma, gamma_minus_one, log10_mass, element_theta, adiabatic_index)
+    else:
+        shocks = vmap(make_forward_state)(
+            gamma,
+            gamma_minus_one,
+            log10_mass,
+            element_theta,
+            adiabatic_index,
+            radius_override,
+            local_density_override,
+        )
+
+    if structure_function is None:
+        patch_shocks = tree_util.tree_map(
+            lambda value: jnp.repeat(value, resolution, axis=0), shocks
+        )
+        patch_gamma = jnp.repeat(gamma, resolution, axis=0)
+        patch_angles = observer_angle(
+            phi_grid, theta_grid, theta_observer, phi_observer
+        )
+    else:
+        patch_shocks = shocks
+        patch_gamma = gamma
+        patch_angles = observer_angle_patches(
+            patch_phi, patch_theta, theta_observer, phi_observer
+        )
+    observers = vmap(observer_state, in_axes=(None, 0, None, 0, 0, 0))(
+        log10_luminosity_distance,
+        solid_angle,
+        azimuth_step,
+        patch_angles,
+        patch_gamma,
+        patch_shocks,
+    )
+
+    reverse_observers = None
+    if reverse_shock:
+        reverse_p = (
+            electron_index if reverse_electron_index is None else reverse_electron_index
+        )
+        reverse_epsilon_e = jnp.power(
+            10.0,
+            (
+                log10_epsilon_e
+                if reverse_log10_epsilon_e is None
+                else reverse_log10_epsilon_e
+            ),
+        )
+        reverse_epsilon_b = jnp.power(
+            10.0,
+            (
+                log10_epsilon_b
+                if reverse_log10_epsilon_b is None
+                else reverse_log10_epsilon_b
+            ),
+        )
+        reverse_xi = (
+            accelerated_fraction
+            if reverse_accelerated_fraction is None
+            else reverse_accelerated_fraction
+        )
+        reverse_spectral_peak = jnp.interp(reverse_p, _P_GRID, _SPECTRAL_PEAK)
+        reverse_peak_flux_factor = jnp.interp(reverse_p, _P_GRID, _PEAK_FLUX)
+        reverse_states = vmap(
+            lambda bg, rg, lm3, lm4, lu3, lx4, radius, th: reverse_shock_state(
+                bg,
+                rg,
+                lm3,
+                lm4,
+                lu3,
+                lx4,
+                radius,
+                th,
+                reverse_p,
+                reverse_spectral_peak,
+                reverse_peak_flux_factor,
+                reverse_epsilon_b,
+                reverse_epsilon_e,
+                azimuth_step,
+                latitude_step,
+                reverse_xi,
+                resolution,
+            )
+        )(
+            reverse_dynamics.bulk_gamma,
+            reverse_dynamics.relative_gamma,
+            reverse_dynamics.log10_reverse_mass,
+            reverse_dynamics.log10_ejecta_mass,
+            reverse_dynamics.log10_reverse_internal_energy,
+            reverse_dynamics.log10_unshocked_width,
+            reverse_dynamics.radius,
+            element_theta,
+        )
+        if structure_function is None:
+            patch_reverse_states = tree_util.tree_map(
+                lambda value: jnp.repeat(value, resolution, axis=0), reverse_states
+            )
+            patch_reverse_gamma = jnp.repeat(
+                reverse_dynamics.bulk_gamma, resolution, axis=0
+            )
+            patch_reverse_time = jnp.repeat(
+                reverse_dynamics.comoving_time, resolution, axis=0
+            )
+        else:
+            patch_reverse_states = reverse_states
+            patch_reverse_gamma = reverse_dynamics.bulk_gamma
+            patch_reverse_time = reverse_dynamics.comoving_time
+        reverse_observers = vmap(
+            reverse_observer_state, in_axes=(None, 0, None, 0, 0, 0, 0)
+        )(
+            log10_luminosity_distance,
+            solid_angle,
+            azimuth_step,
+            patch_angles,
+            patch_reverse_gamma,
+            patch_reverse_time,
+            patch_reverse_states,
+        )
+
+    def one_observation(observer_time_days, observer_frequency):
+        source_frequency = observer_frequency * (1.0 + redshift)
+        if radiation_function is None:
+            patch_log_flux = vmap(
+                lambda state: synchrotron_log_flux(
+                    state, jnp.log10(source_frequency), electron_index
+                )
+            )(observers)
+        else:
+            patch_log_flux = vmap(
+                lambda state: radiation_function(
+                    state,
+                    jnp.log10(source_frequency),
+                    electron_index,
+                    radiation_parameters,
+                )
+            )(observers)
+        source_time = observer_time_days * day_to_s / (1.0 + redshift)
+        interpolated = vmap(
+            lambda times, flux: _log10_linear_interpolate(source_time, times, flux)
+        )(observers.observer_time, patch_log_flux)
+        if reverse_shock:
+            if reverse_radiation_function is None:
+                reverse_patch_log_flux = vmap(
+                    lambda state: synchrotron_log_flux(
+                        state, jnp.log10(source_frequency), reverse_p
+                    )
+                )(reverse_observers)
+            else:
+                reverse_patch_log_flux = vmap(
+                    lambda state: reverse_radiation_function(
+                        state,
+                        jnp.log10(source_frequency),
+                        reverse_p,
+                        reverse_radiation_parameters,
+                    )
+                )(reverse_observers)
+            reverse_interpolated = vmap(
+                lambda times, flux: _log10_linear_interpolate(source_time, times, flux)
+            )(reverse_observers.observer_time, reverse_patch_log_flux)
+            interpolated = jnp.concatenate((interpolated, reverse_interpolated))
+        log10_total = logsumexp(interpolated * math.log(10.0)) / math.log(10.0)
+        return jnp.power(10.0, log10_total + 26.0 + jnp.log10(1.0 + redshift))
+
+    return vmap(one_observation)(time, frequency)
