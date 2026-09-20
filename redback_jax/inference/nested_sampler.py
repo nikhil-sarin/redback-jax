@@ -45,6 +45,7 @@ import os
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import tree_util
 
 try:
     import blackjax
@@ -66,6 +67,8 @@ try:
     HAS_JSN_UTILS = True
 except ImportError:
     HAS_JSN_UTILS = False
+
+from redback_jax.inference.likelihood import make_batched_log_likelihood
 
 
 class NSResult:
@@ -363,3 +366,419 @@ class NestedSampler:
                 print(f"Corner plot saved to {filename}")
 
         return fig, axes
+
+
+class BatchedNestedSampler:
+    """Run independent BlackJAX nested-sampling chains in one vmapped batch.
+
+    Parameters
+    ----------
+    model : str or callable
+        Spectra model used by the shared batched likelihood.
+    dataset : BatchedDataset
+        Padded batch of transient photometry.
+    prior_template : Prior
+        Shared prior for every transient in the batch.
+    fixed_params_batch : dict
+        Per-transient fixed parameters with leading shape ``(B,)``.
+    fixed_params : dict, optional
+        Fixed parameters shared across the whole batch.
+    evaluation_mode : {"full", "compact_source", "direct_photometry"}, optional
+        Model-evaluation mode passed to ``make_batched_log_likelihood``.
+
+    Notes
+    -----
+    All transients share the same prior bounds and parameter order. If a batch
+    needs different prior ranges, split it into groups with compatible priors.
+    """
+
+    def __init__(
+        self,
+        *,
+        model,
+        dataset,
+        prior_template=None,
+        prior=None,
+        fixed_params_batch=None,
+        fixed_params=None,
+        bridges=None,
+        outdir: str = 'results/',
+        n_live: int = 125,
+        n_delete: int = 20,
+        num_mcmc_steps_multiplier: int = 5,
+        termination_dlogz: float = -3.0,
+        max_shrinkage: int = 25,
+        max_steps: int = 10,
+        max_iterations: int | None = None,
+        verbose: bool = True,
+        t0_key: str | None = 't0',
+        evaluation_mode: str = 'full',
+        compact_time_grid_size: int = 256,
+        compact_grid_pad_days: float = 5.0,
+        param_transforms=None,
+    ):
+        if not HAS_BLACKJAX:
+            raise ImportError(
+                "blackjax is required for batched nested sampling.\n"
+                "Install with: pip install git+https://github.com/handley-lab/blackjax@proposal"
+            )
+        if prior_template is None:
+            prior_template = prior
+        if prior_template is None:
+            raise ValueError("BatchedNestedSampler requires prior_template")
+        if fixed_params_batch is None:
+            fixed_params_batch = {}
+
+        self.model = model
+        self.dataset = dataset
+        self.prior = prior_template
+        self.fixed_params_batch = {
+            name: jnp.asarray(value)
+            for name, value in fixed_params_batch.items()
+        }
+        self.fixed_params = dict(fixed_params or {})
+        self.outdir = outdir
+        self.n_live = int(n_live)
+        self.n_delete = int(n_delete)
+        self.n_mcmc_steps = self.prior.n_params * int(num_mcmc_steps_multiplier)
+        self.term_dlogz = float(termination_dlogz)
+        self.max_iterations = max_iterations
+        self.verbose = verbose
+        self.evaluation_mode = evaluation_mode
+
+        self._log_prior_fn = self.prior.log_prob_fn()
+        self._log_like_batch_fn = make_batched_log_likelihood(
+            model,
+            self.fixed_params_batch,
+            self.prior,
+            bridges,
+            dataset,
+            fixed_params=self.fixed_params,
+            t0_key=t0_key,
+            evaluation_mode=evaluation_mode,
+            compact_time_grid_size=compact_time_grid_size,
+            compact_grid_pad_days=compact_grid_pad_days,
+            param_transforms=param_transforms,
+        )
+        self._log_like_fn = self._log_like_batch_fn.indexed
+
+        self._algo = _nss(
+            logprior_fn=self._log_prior_fn,
+            loglikelihood_fn=self._log_like_fn,
+            num_inner_steps=self.n_mcmc_steps,
+            num_delete=self.n_delete,
+            max_shrinkage=max_shrinkage,
+            max_steps=max_steps,
+        )
+
+    def run(self, key: jax.Array) -> list[NSResult]:
+        """Run the batched sampler and return one ``NSResult`` per transient."""
+        key, init_key = jax.random.split(key)
+        init_keys = jax.random.split(init_key, self.dataset.n_batch)
+        initial_particles = jax.vmap(
+            lambda k: self.prior.sample_n(k, self.n_live)
+        )(init_keys)
+
+        states = jax.vmap(self._algo.init, axis_name='batch')(initial_particles)
+        converged = jnp.zeros((self.dataset.n_batch,), dtype=bool)
+
+        if self.verbose:
+            print(
+                f"Batched nested sampling: B={self.dataset.n_batch}, "
+                f"{self.n_live} live points/SN, {self.n_mcmc_steps} MCMC steps/iter, "
+                f"mode={self.evaluation_mode}, device: {jax.devices()[0]}"
+            )
+
+        vmapped_step = jax.jit(jax.vmap(self._algo.step, axis_name='batch'))
+        dead_steps = []
+        active_masks = []
+        iteration = 0
+
+        if self.verbose and HAS_TQDM:
+            pbar = _tqdm.tqdm(desc="Batched dead points", unit=" iter")
+        else:
+            pbar = None
+
+        while True:
+            active_before = ~converged
+            key, step_key = jax.random.split(key)
+            step_keys = jax.random.split(step_key, self.dataset.n_batch)
+            new_states, dead_info = vmapped_step(step_keys, states)
+            states = _freeze_converged_states(converged, states, new_states)
+
+            dead_steps.append(dead_info)
+            active_masks.append(active_before)
+            iteration += 1
+
+            logZ_live = states.integrator.logZ_live
+            logZ = states.integrator.logZ
+            converged = converged | ~(logZ_live - logZ > self.term_dlogz)
+
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_postfix(active=int(np.asarray((~converged).sum())))
+
+            if bool(jnp.all(converged)):
+                break
+            if self.max_iterations is not None and iteration >= self.max_iterations:
+                if self.verbose:
+                    print(
+                        f"Warning: stopped after max_iterations={self.max_iterations}; "
+                        f"{int(np.asarray((~converged).sum()))} chains not converged"
+                    )
+                break
+
+        if pbar is not None:
+            pbar.close()
+
+        results = []
+        for batch_idx in range(self.dataset.n_batch):
+            state_i = tree_util.tree_map(lambda x: x[batch_idx], states)
+            dead_i = [
+                tree_util.tree_map(lambda x, idx=batch_idx: x[idx], dead_step)
+                for dead_step, active in zip(dead_steps, active_masks)
+                if bool(np.asarray(active)[batch_idx])
+            ]
+            result_i = self._finalise_one(key, state_i, dead_i, batch_idx)
+            results.append(result_i)
+
+        return results
+
+    def _finalise_one(self, key, state, dead, batch_idx):
+        dead_all = _bj_finalise(state, dead)
+        key_i = jax.random.fold_in(key, batch_idx)
+        logw_mc = _bj_log_weights(key_i, dead_all)
+        logZs = jax.scipy.special.logsumexp(logw_mc, axis=0)
+        logZ = float(logZs.mean())
+        logw = logw_mc.mean(axis=-1)
+        positions = dead_all.particles.position
+        samples = {
+            name: positions[:, i]
+            for i, name in enumerate(self.prior.names)
+        }
+
+        if self.verbose:
+            label = self.dataset.names[batch_idx]
+            print(f"{label}: log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
+
+        if self.outdir is not None:
+            label = self.dataset.names[batch_idx]
+            safe_label = str(label).replace(os.sep, "_")
+            chains_dir = os.path.join(self.outdir, safe_label, 'chains')
+            os.makedirs(chains_dir, exist_ok=True)
+            try:
+                logL = np.asarray(dead_all.particles.loglikelihood)
+                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                table = np.column_stack([np.asarray(positions), logL, logL_birth])
+                np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
+                with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
+                    for name in self.prior.names:
+                        f.write(f"{name}\t{name}\n")
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: could not save chains for {label}: {e}")
+
+        return NSResult(
+            logZ=logZ,
+            samples=samples,
+            dead=dead_all,
+            log_weights=logw,
+            param_names=self.prior.names,
+        )
+
+
+class BatchedFluxDensityNestedSampler:
+    """Batched nested sampler for :class:`~redback_jax.inference.batch.BatchedFluxDensityDataset`.
+
+    All SNe share the same prior template.  The ``t0`` parameter (if present)
+    is sampled as days *before* each SN's first observation — the absolute MJD
+    is recovered inside the likelihood via ``t0_ref + t0_offset``.
+
+    Parameters
+    ----------
+    model : callable
+        ``csm_nickel_flux_density`` or any model with the same signature.
+    dataset : BatchedFluxDensityDataset
+    prior : Prior
+        Shared prior for all SNe. ``t0`` bounds should be in days-before-first-obs
+        (e.g. ``Uniform(-150, -2, name='t0')``).
+    fixed_params_batch : dict
+        Per-SN fixed params as ``(B,)`` arrays — ``redshift``, ``lum_dist``.
+    fixed_params : dict, optional
+        Shared fixed params — ``kappa``, ``temperature_floor``, etc.
+    outdir : str
+        Root directory; results saved to ``outdir/<sn_name>/``.
+    """
+
+    def __init__(
+        self,
+        *,
+        model,
+        dataset,
+        prior,
+        fixed_params_batch,
+        fixed_params=None,
+        outdir='results/',
+        n_live=125,
+        n_delete=20,
+        num_mcmc_steps_multiplier=5,
+        termination_dlogz=-3.0,
+        max_shrinkage=25,
+        max_steps=10,
+        max_iterations=None,
+        verbose=True,
+        t0_key='t0',
+        param_transforms=None,
+    ):
+        if not HAS_BLACKJAX:
+            raise ImportError("blackjax is required for batched nested sampling.")
+
+        from redback_jax.inference.likelihood import make_batched_flux_density_log_likelihood
+
+        self.model   = model
+        self.dataset = dataset
+        self.prior   = prior
+        self.outdir  = outdir
+        self.n_live  = n_live
+        self.n_delete = n_delete
+        self.n_mcmc_steps = prior.n_params * num_mcmc_steps_multiplier
+        self.term_dlogz   = float(termination_dlogz)
+        self.max_iterations = max_iterations
+        self.verbose = verbose
+
+        self._log_prior_fn = prior.log_prob_fn()
+        batch_ll = make_batched_flux_density_log_likelihood(
+            model, dataset, prior,
+            fixed_params_batch=fixed_params_batch,
+            fixed_params=fixed_params,
+            t0_key=t0_key,
+            param_transforms=param_transforms,
+        )
+        self._log_like_fn = batch_ll.indexed
+
+        self._algo = _nss(
+            logprior_fn=self._log_prior_fn,
+            loglikelihood_fn=self._log_like_fn,
+            num_inner_steps=self.n_mcmc_steps,
+            num_delete=self.n_delete,
+            max_shrinkage=max_shrinkage,
+            max_steps=max_steps,
+        )
+
+    def run(self, key):
+        """Run all chains and return a list of NSResult (one per SN)."""
+        B = self.dataset.n_batch
+        key, init_key = jax.random.split(key)
+        init_keys = jax.random.split(init_key, B)
+        initial_particles = jax.vmap(
+            lambda k: self.prior.sample_n(k, self.n_live)
+        )(init_keys)
+
+        states    = jax.vmap(self._algo.init, axis_name='batch')(initial_particles)
+        converged = jnp.zeros((B,), dtype=bool)
+
+        if self.verbose:
+            print(
+                f"Batched flux-density NS: B={B}, {self.n_live} live/SN, "
+                f"{self.n_mcmc_steps} MCMC steps/iter, device: {jax.devices()[0]}"
+            )
+
+        vmapped_step = jax.jit(jax.vmap(self._algo.step, axis_name='batch'))
+        dead_steps, active_masks = [], []
+        iteration = 0
+
+        pbar = (_tqdm.tqdm(desc='Batched dead points', unit=' iter')
+                if self.verbose and HAS_TQDM else None)
+
+        while True:
+            active_before = ~converged
+            key, step_key = jax.random.split(key)
+            step_keys = jax.random.split(step_key, B)
+            new_states, dead_info = vmapped_step(step_keys, states)
+            states = _freeze_converged_states(converged, states, new_states)
+
+            dead_steps.append(dead_info)
+            active_masks.append(active_before)
+            iteration += 1
+
+            logZ_live = states.integrator.logZ_live
+            logZ      = states.integrator.logZ
+            converged = converged | ~(logZ_live - logZ > self.term_dlogz)
+
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_postfix(active=int(np.asarray((~converged).sum())))
+
+            if bool(jnp.all(converged)):
+                break
+            if self.max_iterations is not None and iteration >= self.max_iterations:
+                if self.verbose:
+                    print(f"Warning: stopped at max_iterations={self.max_iterations}, "
+                          f"{int(np.asarray((~converged).sum()))} chains not converged")
+                break
+
+        if pbar is not None:
+            pbar.close()
+
+        results = []
+        for i in range(B):
+            state_i = tree_util.tree_map(lambda x, idx=i: x[idx], states)
+            dead_i  = [
+                tree_util.tree_map(lambda x, idx=i: x[idx], ds)
+                for ds, am in zip(dead_steps, active_masks)
+                if bool(np.asarray(am)[i])
+            ]
+            results.append(self._finalise(key, state_i, dead_i, i))
+
+        return results
+
+    def _finalise(self, key, state, dead, batch_idx):
+        dead_all = _bj_finalise(state, dead)
+        key_i    = jax.random.fold_in(key, batch_idx)
+        logw_mc  = _bj_log_weights(key_i, dead_all)
+        logZs    = jax.scipy.special.logsumexp(logw_mc, axis=0)
+        logZ     = float(logZs.mean())
+        logw     = logw_mc.mean(axis=-1)
+        positions = dead_all.particles.position
+        samples   = {name: positions[:, i] for i, name in enumerate(self.prior.names)}
+        sn_name   = self.dataset.names[batch_idx]
+
+        if self.verbose:
+            print(f"  {sn_name}: log Z = {logZ:.2f} ± {float(logZs.std()):.2f}")
+
+        if self.outdir is not None:
+            import pandas as pd
+            outdir_sn = os.path.join(self.outdir, str(sn_name))
+            os.makedirs(outdir_sn, exist_ok=True)
+            post_df = pd.DataFrame({k: np.array(v) for k, v in samples.items()})
+            post_df['logZ'] = logZ
+            post_df.to_csv(os.path.join(outdir_sn, 'posterior.csv'), index=False)
+
+            chains_dir = os.path.join(outdir_sn, 'chains')
+            os.makedirs(chains_dir, exist_ok=True)
+            try:
+                logL       = np.asarray(dead_all.particles.loglikelihood)
+                logL_birth = np.asarray(dead_all.particles.loglikelihood_birth)
+                table = np.column_stack([np.asarray(positions), logL, logL_birth])
+                np.savetxt(os.path.join(chains_dir, 'chains_dead-birth.txt'), table)
+                with open(os.path.join(chains_dir, 'chains.paramnames'), 'w') as f:
+                    for name in self.prior.names:
+                        f.write(f"{name}\t{name}\n")
+            except Exception as e:
+                if self.verbose:
+                    print(f"  Warning: could not save chains for {sn_name}: {e}")
+
+        return NSResult(
+            logZ=logZ, samples=samples, dead=dead_all,
+            log_weights=logw, param_names=self.prior.names,
+        )
+
+
+def _freeze_converged_states(converged, old_state, new_state):
+    def _freeze_leaf(old, new):
+        cond = converged
+        while cond.ndim < new.ndim:
+            cond = cond[..., None]
+        return jnp.where(cond, old, new)
+
+    return tree_util.tree_map(_freeze_leaf, old_state, new_state)
