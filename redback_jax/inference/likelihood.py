@@ -92,6 +92,7 @@ def _make_photometric_log_likelihood_kernel(
     """Return ``(params, data..., fixed_dynamic) -> scalar`` for one transient."""
     transforms = {k: (mn, fn) for k, (mn, fn) in param_transforms.items()}
     direct_photometry_fn = getattr(model_fn, '_redback_jax_direct_photometry', None)
+    grid_photometry_fn = getattr(model_fn, '_redback_jax_grid_photometry', None)
     zero_before = True
 
     def _log_like_one(
@@ -128,6 +129,14 @@ def _make_photometric_log_likelihood_kernel(
                 bridges=bridges,
                 **model_kwargs,
             )
+        elif evaluation_mode in ('grid_photometry', 'bandflux'):
+            norm_fluxes = grid_photometry_fn(
+                obs_source_time=t_source,
+                obs_band_idx=safe_band_idx,
+                bridges=bridges,
+                _time_observer_frame_grid=compact_time_grid,
+                **model_kwargs,
+            )
         else:
             if evaluation_mode == 'compact_source':
                 out = model_fn(
@@ -145,11 +154,26 @@ def _make_photometric_log_likelihood_kernel(
                 time_degree=1, zps=zps, zpsys='ab',
             )
 
-        model_mags = -2.5 * jnp.log10(norm_fluxes + 1e-100)
-        residual = (safe_mags - model_mags) / safe_errs
-        residual = jnp.where(mask, residual, 0.0)
-        chi2 = jnp.sum(residual ** 2)
-        finite = jnp.all(jnp.isfinite(jnp.where(mask, model_mags, 0.0)))
+        if evaluation_mode == 'bandflux':
+            # Gaussian likelihood in flux space: correct for log-normal mag errors.
+            # norm_fluxes are AB-normalised (norm=1 → AB mag 0 → 3631 Jy).
+            _ab_mjy = jnp.array(3631e3, dtype=norm_fluxes.dtype)
+            model_flux = norm_fluxes * _ab_mjy
+            obs_flux   = _ab_mjy * jnp.power(jnp.array(10.0, dtype=norm_fluxes.dtype),
+                                              -safe_mags / 2.5)
+            obs_flux_err = (jnp.log(jnp.array(10.0, dtype=norm_fluxes.dtype)) / 2.5
+                            * obs_flux * safe_errs)
+            safe_flux_err = jnp.where(mask, obs_flux_err, jnp.array(1.0, dtype=norm_fluxes.dtype))
+            residual = (obs_flux - model_flux) / safe_flux_err
+            residual = jnp.where(mask, residual, 0.0)
+            chi2 = jnp.sum(residual ** 2)
+            finite = jnp.all(jnp.isfinite(jnp.where(mask, model_flux, 0.0)))
+        else:
+            model_mags = -2.5 * jnp.log10(norm_fluxes + 1e-100)
+            residual = (safe_mags - model_mags) / safe_errs
+            residual = jnp.where(mask, residual, 0.0)
+            chi2 = jnp.sum(residual ** 2)
+            finite = jnp.all(jnp.isfinite(jnp.where(mask, model_mags, 0.0)))
         return jnp.where(finite, -0.5 * chi2, -1e30)
 
     return _log_like_one
@@ -174,13 +198,16 @@ class Likelihood:
         When present in the prior the likelihood converts ``transient.time``
         from observer-frame MJD to source-frame days automatically.
         Set to ``None`` if times are already in source-frame days.
-    evaluation_mode : {"full", "compact_source", "direct_photometry"}, optional
+    evaluation_mode : {"full", "compact_source", "direct_photometry", "grid_photometry", "bandflux"}, optional
         ``"full"`` preserves the existing model-default source grid.
         ``"compact_source"`` uses a dataset-specific source phase grid while
         still going through ``jax_supernovae.timeseries_multiband_flux``.
         ``"direct_photometry"`` bypasses full source-cube materialization for
         factory-built blackbody spectra models and integrates directly through
         the bandpasses.
+        ``"grid_photometry"`` computes bolometric/photosphere quantities on a
+        source-time grid, interpolates them to observations, and integrates only
+        observed bandpasses.
     """
 
     def __init__(
@@ -233,7 +260,7 @@ class Likelihood:
 
         self._bands_raw = bands_raw
 
-        valid_modes = {'full', 'compact_source', 'direct_photometry'}
+        valid_modes = {'full', 'compact_source', 'direct_photometry', 'grid_photometry', 'bandflux'}
         if self.evaluation_mode not in valid_modes:
             raise ValueError(
                 f"evaluation_mode must be one of {sorted(valid_modes)}, got {evaluation_mode!r}"
@@ -273,12 +300,20 @@ class Likelihood:
                 **dummy_kwargs,
             )
             self._minphase = float(self._compact_time_observer_grid[0])
-        else:
+        elif self.evaluation_mode == 'direct_photometry':
             direct_fn = getattr(self._model_fn, '_redback_jax_direct_photometry', None)
             if direct_fn is None:
                 raise ValueError(
                     f"Model {self.model_name!r} does not support direct_photometry evaluation"
                 )
+        elif self.evaluation_mode in ('grid_photometry', 'bandflux'):
+            grid_fn = getattr(self._model_fn, '_redback_jax_grid_photometry', None)
+            if grid_fn is None:
+                raise ValueError(
+                    f"Model {self.model_name!r} does not support grid_photometry/bandflux evaluation"
+                )
+            self._compact_time_observer_grid = self._build_compact_time_observer_grid(prior)
+            self._minphase = float(self._compact_time_observer_grid[0])
 
     def _build_compact_time_observer_grid(self, prior):
         """Build an observer-frame phase grid covering the whole dataset support."""
@@ -374,7 +409,7 @@ def make_batched_log_likelihood(
         Padded photometric observations.
     fixed_params : dict, optional
         Fixed parameters shared by every transient.
-    evaluation_mode : {"full", "compact_source", "direct_photometry"}, optional
+    evaluation_mode : {"full", "compact_source", "direct_photometry", "grid_photometry", "bandflux"}, optional
         Uses the same model-evaluation modes as :class:`Likelihood`. The default
         is ``"full"`` because dense light curves can be faster through the
         spectra/interpolation path than through per-observation direct
@@ -412,7 +447,7 @@ def make_batched_log_likelihood(
                 f"expected {dataset.n_batch}"
             )
 
-    valid_modes = {'full', 'compact_source', 'direct_photometry'}
+    valid_modes = {'full', 'compact_source', 'direct_photometry', 'grid_photometry', 'bandflux'}
     if evaluation_mode not in valid_modes:
         raise ValueError(
             f"evaluation_mode must be one of {sorted(valid_modes)}, got {evaluation_mode!r}"
@@ -429,6 +464,12 @@ def make_batched_log_likelihood(
         raise ValueError(
             f"Model {model_name!r} does not support direct_photometry evaluation"
         )
+    if evaluation_mode in ('grid_photometry', 'bandflux') and getattr(
+        model_fn, '_redback_jax_grid_photometry', None
+    ) is None:
+        raise ValueError(
+            f"Model {model_name!r} does not support {evaluation_mode} evaluation"
+        )
 
     bridges = _build_bandflux_bridges(dataset.bands) if bridges is None else bridges
     dummy_kwargs = _dummy_model_kwargs(
@@ -439,7 +480,7 @@ def make_batched_log_likelihood(
         param_transforms or {},
     )
     compact_time_grid = None
-    if evaluation_mode == 'compact_source':
+    if evaluation_mode in {'compact_source', 'grid_photometry', 'bandflux'}:
         compact_time_grid = _build_batched_compact_time_observer_grid(
             dataset,
             prior,
@@ -449,10 +490,11 @@ def make_batched_log_likelihood(
             compact_time_grid_size,
             compact_grid_pad_days,
         )
-        model_fn(
-            _time_observer_frame_grid=compact_time_grid,
-            **dummy_kwargs,
-        )
+        if evaluation_mode == 'compact_source':
+            model_fn(
+                _time_observer_frame_grid=compact_time_grid,
+                **dummy_kwargs,
+            )
         minphase = float(compact_time_grid[0])
     elif evaluation_mode == 'direct_photometry':
         minphase = None
@@ -671,3 +713,92 @@ class FluxDensityLikelihood:
             f"n_obs={len(self._F_obs)}, "
             f"fixed={list(self.fixed_params.keys())})"
         )
+
+
+def make_batched_flux_density_log_likelihood(
+    model,
+    dataset,            # BatchedFluxDensityDataset
+    prior,
+    fixed_params_batch: Dict,   # (B,) arrays: redshift, lum_dist
+    fixed_params: Optional[Dict] = None,   # shared: kappa, temperature_floor, ...
+    t0_key: Optional[str] = 't0',
+    param_transforms: Optional[Dict] = None,
+):
+    """Build a vmapped log-likelihood for :class:`BatchedFluxDensityDataset`.
+
+    The ``t0`` prior parameter is treated as an offset in days relative to
+    each SN's ``dataset.t0_refs`` (first observation MJD).  This lets all SNe
+    share a single prior even though they span different MJD ranges.
+
+    Returns an object whose ``.indexed`` attribute is the per-chain log-likelihood
+    consumed by :class:`BatchedFluxDensityNestedSampler`.
+    """
+    names       = list(prior.names)
+    _transforms = dict(param_transforms or {})
+    fixed       = dict(fixed_params or {})
+
+    obs_times    = dataset.obs_times      # (B, N_max)
+    obs_freq     = dataset.obs_freq       # (B, N_max)
+    obs_flux     = dataset.obs_flux       # (B, N_max)
+    obs_flux_err = dataset.obs_flux_err   # (B, N_max)
+    mask         = dataset.mask           # (B, N_max)
+    t0_refs      = dataset.t0_refs        # (B,)
+
+    fixed_b = {k: jnp.asarray(v) for k, v in fixed_params_batch.items()}
+
+    def _kernel(params, t_obs, nu, F_obs, F_err, mask_i, fixed_i):
+        param_dict = {}
+        for i, n in enumerate(names):
+            if n in _transforms:
+                model_name, fn = _transforms[n]
+                param_dict[model_name] = fn(params[i])
+            else:
+                param_dict[n] = params[i]
+
+        if t0_key is not None and t0_key in param_dict:
+            t0_offset = param_dict.pop(t0_key)
+            t0_mjd  = fixed_i['_t0_ref'] + t0_offset
+            t_model = t_obs - t0_mjd
+        else:
+            t_model = t_obs
+
+        merged = dict(fixed)
+        merged.update({k: v for k, v in fixed_i.items() if k != '_t0_ref'})
+        F_pred = model(t_model, nu, **merged, **param_dict)
+
+        is_finite = jnp.all(jnp.where(mask_i, jnp.isfinite(F_pred), True))
+        F_safe = jnp.where(is_finite, jnp.nan_to_num(F_pred), jnp.zeros_like(F_pred))
+        safe_err = jnp.where(mask_i, F_err, 1.0)
+        resid = jnp.where(mask_i, (F_safe - F_obs) / safe_err, 0.0)
+        chi2 = jnp.sum(resid ** 2)
+        return jnp.where(is_finite, -0.5 * chi2, -1e30)
+
+    def _indexed_log_like(params):
+        idx = jax.lax.axis_index('batch')
+        fixed_i = {k: v[idx] for k, v in fixed_b.items()}
+        fixed_i['_t0_ref'] = t0_refs[idx]
+        return _kernel(
+            params,
+            obs_times[idx],
+            obs_freq[idx],
+            obs_flux[idx],
+            obs_flux_err[idx],
+            mask[idx],
+            fixed_i,
+        )
+
+    @jax.jit
+    def _batched_log_like(params_batch):
+        def _one(params, t_obs, nu, F_obs, F_err, mask_i, t0_ref, *fixed_vals):
+            fixed_i = {k: v for k, v in zip(fixed_b.keys(), fixed_vals)}
+            fixed_i['_t0_ref'] = t0_ref
+            return _kernel(params, t_obs, nu, F_obs, F_err, mask_i, fixed_i)
+
+        fixed_vals = [fixed_b[k] for k in fixed_b]
+        return jax.vmap(_one)(
+            params_batch, obs_times, obs_freq, obs_flux, obs_flux_err, mask,
+            t0_refs, *fixed_vals,
+        )
+
+    _batched_log_like.indexed = _indexed_log_like
+    return _batched_log_like
