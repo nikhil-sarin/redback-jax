@@ -11,9 +11,10 @@ jax.config.update("jax_enable_x64", True)
 
 from redback_jax.sed import (
     cutoff_blackbody_flux_density,
-    cutoff_blackbody_sed,
-    blackbody_flux_density,
+    cutoff_blackbody_flux_density_with_norm,
+    cutoff_blackbody_norm,
 )
+from redback_jax.models.supernova_models import blackbody_to_flux_density
 
 
 # ---------------------------------------------------------------------------
@@ -23,8 +24,7 @@ from redback_jax.sed import (
 def _redback_cutoff_bb(time, temperature, luminosity, r_photosphere,
                         frequency, dl, cutoff_wl, alpha=1.0):
     """Return flux density in mJy from redback's CutoffBlackbody."""
-    import sys
-    sys.path.insert(0, "/home/nikhilsarin/projects/redback")
+    pytest.importorskip("redback")
     from redback.sed import CutoffBlackbody
     sed = CutoffBlackbody(
         time=time,
@@ -76,8 +76,7 @@ def test_cutoff_bb_1d_matches_redback(slsn_params):
 
     ref = _redback_cutoff_bb(time, T, L, R, freq, dl, cutoff_wl, alpha)
     jax_out = np.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, cutoff_wl, alpha,
+        jnp.array(freq), jnp.array(L), jnp.array(T), jnp.array(R), dl, cutoff_wl, alpha,
     ))
 
     # Strip astropy shape quirks from redback output
@@ -98,8 +97,7 @@ def test_cutoff_bb_absorption_index(slsn_params, alpha):
 
     ref = _redback_cutoff_bb(time, T, L, R, freq, dl, cutoff_wl, alpha)
     jax_out = np.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, cutoff_wl, alpha,
+        jnp.array(freq), jnp.array(L), jnp.array(T), jnp.array(R), dl, cutoff_wl, alpha,
     ))
     ref = np.asarray(ref).flatten()
     rel_err = np.abs((jax_out - ref) / np.maximum(np.abs(ref), 1e-30))
@@ -107,34 +105,21 @@ def test_cutoff_bb_absorption_index(slsn_params, alpha):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: 2-D (spectral) mode produces consistent results
+# Test 3: precomputed-norm variant matches the direct evaluation
 # ---------------------------------------------------------------------------
 
-def test_cutoff_bb_2d_mode(slsn_params):
-    """2-D mode evaluated at the data-point frequencies should match 1-D."""
+def test_cutoff_bb_with_norm_matches_direct(slsn_params):
     time, T, L, R, freq, dl = slsn_params
-    cutoff_wl = 3000.0
-    alpha     = 1.0
+    cutoff_wl, alpha = 3000.0, 1.0
+    T, L, R, freq = (jnp.array(x) for x in (T, L, R, freq))
 
-    # Unique frequencies
-    unique_freq = np.unique(freq)
-
-    out_2d = np.array(cutoff_blackbody_sed(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(unique_freq), dl, cutoff_wl, alpha,
-    ))  # (n_f, n_t)
-
-    out_1d = np.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, cutoff_wl, alpha,
-    ))  # (n,)
-
-    # For each data point, cross-check via 2D output
-    freq_idx = {f: i for i, f in enumerate(unique_freq)}
-    for i, (fi, ti) in enumerate(zip(freq, range(N))):
-        fi_idx = freq_idx[fi]
-        rel = abs(out_2d[fi_idx, ti] - out_1d[i]) / max(abs(out_1d[i]), 1e-30)
-        assert rel < 1e-10, f"2D/1D mismatch at i={i}: {rel:.2e}"
+    direct = np.array(cutoff_blackbody_flux_density(freq, L, T, R, dl, cutoff_wl, alpha))
+    norm = cutoff_blackbody_norm(L, T, R, cutoff_wl, alpha)
+    via_norm = np.array(cutoff_blackbody_flux_density_with_norm(
+        freq, T, R, dl, norm, cutoff_wl, alpha,
+    ))
+    rel = np.abs(direct - via_norm) / np.maximum(np.abs(direct), 1e-30)
+    assert rel.max() < 1e-10, f"with_norm/direct mismatch: {rel.max():.2e}"
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +129,7 @@ def test_cutoff_bb_2d_mode(slsn_params):
 def test_cutoff_bb_positive_finite(slsn_params):
     time, T, L, R, freq, dl = slsn_params
     out = np.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, 3000.0,
+        jnp.array(freq), jnp.array(L), jnp.array(T), jnp.array(R), dl, 3000.0,
     ))
     assert np.all(np.isfinite(out)), "Non-finite values in output"
     assert np.all(out > 0), "Non-positive flux density"
@@ -158,12 +142,10 @@ def test_cutoff_bb_positive_finite(slsn_params):
 def test_cutoff_bb_jit_stable(slsn_params):
     time, T, L, R, freq, dl = slsn_params
     a = jnp.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, 3000.0,
+        jnp.array(freq), jnp.array(L), jnp.array(T), jnp.array(R), dl, 3000.0,
     ))
     b = jnp.array(cutoff_blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(L),
-        jnp.array(freq), dl, 3000.0,
+        jnp.array(freq), jnp.array(L), jnp.array(T), jnp.array(R), dl, 3000.0,
     ))
     np.testing.assert_array_equal(a, b)
 
@@ -173,14 +155,14 @@ def test_cutoff_bb_jit_stable(slsn_params):
 # ---------------------------------------------------------------------------
 
 def test_blackbody_matches_redback(slsn_params):
-    import sys
-    sys.path.insert(0, "/home/nikhilsarin/projects/redback")
+    pytest.importorskip("redback")
     time, T, L, R, freq, dl = slsn_params
-    from redback.sed import blackbody_to_flux_density
+    from redback.sed import blackbody_to_flux_density as rb_blackbody
     import astropy.units as uu
-    ref = blackbody_to_flux_density(T, R, dl, freq).to(uu.mJy).value
-    out = np.array(blackbody_flux_density(
-        jnp.array(T), jnp.array(R), jnp.array(freq), dl,
+    ref = rb_blackbody(T, R, dl, freq).to(uu.mJy).value
+    # supernova_models version returns erg/s/Hz/cm^2; convert to mJy
+    out = 1e26 * np.array(blackbody_to_flux_density(
+        jnp.array(T), jnp.array(R), dl, jnp.array(freq),
     ))
     ref = np.asarray(ref).flatten()
     rel_err = np.abs((out - ref) / np.maximum(np.abs(ref), 1e-30))

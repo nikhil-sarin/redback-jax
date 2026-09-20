@@ -116,9 +116,9 @@ def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     :return: flux_density in erg/s/Hz/cm^2
     """
     # Use Python float constants to avoid astropy float64 promotion
-    _h   = 6.626e-27   # erg s
-    _c   = 2.998e10    # cm/s
-    _kB  = 1.381e-16   # erg/K
+    _h   = 6.62607015e-27   # erg s
+    _c   = 2.99792458e10    # cm/s
+    _kB  = 1.380649e-16   # erg/K
     num  = 2.0 * jnp.pi * _h * frequency ** 3 * r_photosphere ** 2
     denom = dl ** 2 * _c ** 2
     frac  = 1.0 / jnp.expm1((_h * frequency) / (_kB * temperature))
