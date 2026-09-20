@@ -100,7 +100,7 @@ def _union_bands(transients: Iterable) -> list[str]:
     bands = []
     seen = set()
     for transient in transients:
-        for band in transient.bands:
+        for band in (getattr(transient, "bands", None) or []):
             if band not in seen:
                 seen.add(band)
                 bands.append(band)

@@ -445,6 +445,16 @@ def _csm_engine(time, mej, csm_mass, vej, eta, rho, kappa, r0, nn, AA, Bf, Br,
 
     ti  = 1.0  # seconds offset
 
+    # The photosphere expressions below contain (1 - eta) in a denominator and
+    # an exponent, so eta == 1 is singular (redback raises ZeroDivisionError;
+    # unguarded this silently returned ~1e29 erg/s).  Nudge eta out of a small
+    # band around 1; the light curve is smooth there (<0.02 dex change).
+    eta = jnp.where(
+        jnp.abs(eta - 1.0) < 1e-2,
+        1.0 + jnp.where(eta >= 1.0, 1e-2, -1e-2),
+        eta,
+    )
+
     qq         = rho * r0_cm ** eta
     radius_csm = ((3.0 - eta) / (4.0 * jnp.pi * qq) * csm_mass_g
                   + r0_cm ** (3.0 - eta)) ** (1.0 / (3.0 - eta))
