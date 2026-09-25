@@ -1,4 +1,4 @@
-# GPU runtime image for redback-jax (jax[cuda12]).
+# GPU runtime image for redback-jax (jax[cuda13]).
 # Same as containers/Dockerfile but CUDA JAX so the float32-safe models run on a
 # GPU worker. Distributed via CVMFS (no per-job pull), which matters here: the
 # CUDA wheels make this image multi-GB.
@@ -14,12 +14,12 @@ RUN apt-get update \
 RUN pip3 install uv
 
 # External deps first (heavy wheels + a remote git checkout) so a local source
-# change doesn't invalidate their cache layer. The jax[cuda12] wheels bundle
-# CUDA 12 + cuDNN, so only a host driver is needed at runtime; cuda12 (not 13)
-# matches the broadest GPU-node driver pool. Then the handley-lab nested-sampling
+# change doesn't invalidate their cache layer. The jax[cuda13] wheels bundle
+# CUDA 13 + cuDNN, so only a host driver is needed at runtime; cuda13 matches the
+# OSPool GPU-node drivers (the cuda12 wheels fail CUDA init on them). Then
 # mainline blackjax for the SMC+NUTS sampler used via run_nested_sampling (the
 # handley-lab NS fork is avoided: its older JAX API breaks on current JAX).
-RUN uv pip install --system --break-system-packages "jax[cuda12]"
+RUN uv pip install --system --break-system-packages "jax[cuda13]"
 RUN uv pip install --system --break-system-packages blackjax anesthetic
 
 # redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
