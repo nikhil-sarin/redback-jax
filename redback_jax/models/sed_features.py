@@ -148,24 +148,28 @@ def apply_sed_feature(features, base_flux, frequency, time):
 
     :return: modified flux_density as a 2-d array (time, wavelength) in erg/s/Hz/cm^2
     """
+    fp = base_flux.dtype
     # Convert frequency to wavelength
-    freq_for_wavelength = jnp.atleast_1d(frequency)
-    wavelength_angstrom = speed_of_light / freq_for_wavelength * 1e8
+    freq_for_wavelength = jnp.atleast_1d(frequency).astype(fp)
+    wavelength_angstrom = jnp.asarray(speed_of_light, dtype=fp) / freq_for_wavelength * jnp.asarray(1e8, dtype=fp)
 
     # Calculate the Gaussian profile.
-    wl_diff = wavelength_angstrom[None, :] - features.rest_wavelengths[:, None]
-    gaussian_profiles = jnp.exp(-0.5 * (wl_diff / features.sigmas[:, None]) ** 2)
+    rest_wavelengths = features.rest_wavelengths.astype(fp)
+    sigmas = features.sigmas.astype(fp)
+    amplitudes = features.amplitudes.astype(fp)
+    wl_diff = wavelength_angstrom[None, :] - rest_wavelengths[:, None]
+    gaussian_profiles = jnp.exp(jnp.asarray(-0.5, dtype=fp) * (wl_diff / sigmas[:, None]) ** 2)
 
     # Calculate the time factors for this feature
-    time_factors = features.calculate_smooth_evolution(time)
+    time_factors = features.calculate_smooth_evolution(time).astype(fp)
 
     # flux is (time, freq)
     # Broadcast to (n_features, n_times, n_freq)
     feature_contributions = (
-        features.amplitudes[:, None, None] *
+        amplitudes[:, None, None] *
         time_factors[:, :, None] *
         gaussian_profiles[:, None, :]
     )
 
-    total_feature_factor = 1.0 + jnp.sum(feature_contributions, axis=0)
+    total_feature_factor = jnp.asarray(1.0, dtype=fp) + jnp.sum(feature_contributions, axis=0)
     return base_flux * total_feature_factor

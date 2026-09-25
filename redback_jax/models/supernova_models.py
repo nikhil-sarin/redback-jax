@@ -26,8 +26,13 @@ from redback_jax.models.sed_features import NO_SED_FEATURES, apply_sed_feature
 from redback_jax.photosphere import compute_temperature_floor_log10
 from redback_jax.sed import cutoff_blackbody_flux_density
 
-# Enable float64 — the general magnetar ODE state spans ~16 orders of magnitude.
-jax.config.update("jax_enable_x64", True)
+# NOTE: float64 is only needed for the general-magnetar ODE solver
+# (general_magnetar_driven_supernova*), which enables it internally via
+# fp = jnp.float64.  Analytic models (arnett, magnetar_nickel, magnetar_powered)
+# are float32-safe and use fp = time.dtype throughout.  We therefore do NOT
+# enable x64 globally so that analytic models run in float32 on GPU.
+# If you need the ODE solver, set JAX_ENABLE_X64=1 in the environment before
+# importing this module.
 
 # ---------------------------------------------------------------------------
 # Physical constants — Python floats (not astropy, avoids float64 promotion)
@@ -91,6 +96,13 @@ _csm_Bf_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Bf_grid,
 _csm_Br_interp = _RGI((_csm_nn_unique, _csm_eta_unique), _csm_Br_grid,
                        bounds_error=False, fill_value=None)
 
+# JAX-interpolable CSM coefficients for nn=12 (fixed) — makes eta differentiable
+_csm_nn12_idx = int(_np.argmin(_np.abs(_csm_nn_unique - 12.0)))
+_csm_eta_jax  = jnp.array(_csm_eta_unique,                   dtype=jnp.float64)
+_csm_AA_nn12  = jnp.array(_csm_AA_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+_csm_Bf_nn12  = jnp.array(_csm_Bf_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+_csm_Br_nn12  = jnp.array(_csm_Br_grid[_csm_nn12_idx, :],   dtype=jnp.float64)
+
 
 
 def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
@@ -104,9 +116,9 @@ def blackbody_to_flux_density(temperature, r_photosphere, dl, frequency):
     :return: flux_density in erg/s/Hz/cm^2
     """
     # Use Python float constants to avoid astropy float64 promotion
-    _h   = 6.626e-27   # erg s
-    _c   = 2.998e10    # cm/s
-    _kB  = 1.381e-16   # erg/K
+    _h   = 6.62607015e-27   # erg s
+    _c   = 2.99792458e10    # cm/s
+    _kB  = 1.380649e-16   # erg/K
     num  = 2.0 * jnp.pi * _h * frequency ** 3 * r_photosphere ** 2
     denom = dl ** 2 * _c ** 2
     frac  = 1.0 / jnp.expm1((_h * frequency) / (_kB * temperature))
@@ -371,7 +383,7 @@ def magnetar_powered_bolometric(time, p0, bp, mass_ns, theta_pb,
     :param vej: ejecta velocity in km/s
     :return: log10 of bolometric luminosity in erg/s
     """
-    dense_times = jnp.linspace(0.01, time[-1] + 100.0, 1000)
+    dense_times = jnp.geomspace(jnp.array(1e-5, dtype=time.dtype), time[-1] + 100.0, 1000)
     log10_p0 = jnp.log10(jnp.maximum(p0, 1e-10))
     log10_bp = jnp.log10(jnp.maximum(bp, 1e-10))
     log10_dense_lbols = _magnetar_log10_lbol(dense_times, log10_p0, log10_bp, mass_ns, theta_pb)
@@ -432,6 +444,16 @@ def _csm_engine(time, mej, csm_mass, vej, eta, rho, kappa, r0, nn, AA, Bf, Br,
     Esn        = jnp.power(10.0, log10_Esn)
 
     ti  = 1.0  # seconds offset
+
+    # The photosphere expressions below contain (1 - eta) in a denominator and
+    # an exponent, so eta == 1 is singular (redback raises ZeroDivisionError;
+    # unguarded this silently returned ~1e29 erg/s).  Nudge eta out of a small
+    # band around 1; the light curve is smooth there (<0.02 dex change).
+    eta = jnp.where(
+        jnp.abs(eta - 1.0) < 1e-2,
+        1.0 + jnp.where(eta >= 1.0, 1e-2, -1e-2),
+        eta,
+    )
 
     qq         = rho * r0_cm ** eta
     radius_csm = ((3.0 - eta) / (4.0 * jnp.pi * qq) * csm_mass_g
@@ -510,7 +532,8 @@ def magnetar_nickel_bolometric(time, f_nickel, mej, p0, bp, mass_ns, theta_pb,
     :param vej: ejecta velocity in km/s
     :return: log10 of bolometric luminosity in erg/s
     """
-    dense_times = jnp.linspace(0.01, time[-1] + 100.0, 1000)
+    dense_end = jnp.maximum(jnp.max(time), jnp.array(0.01, dtype=time.dtype)) + 100.0
+    dense_times = jnp.geomspace(jnp.array(1e-5, dtype=time.dtype), dense_end, 1000)
 
     # Ni/Co decay engine in log10 space
     log10_nickel = _nickelcobalt_log10_engine(dense_times, f_nickel, mej)
@@ -576,6 +599,21 @@ def csm_interaction_bolometric(time, mej, csm_mass, vej, eta, rho, kappa, r0,
 # Translated from redback's _ejecta_dynamics_and_interaction + magnetar_only
 # + TemperatureFloor + CutoffBlackbody (Sarin+22, Omand&Sarin+24, Nicholl+17)
 # ===========================================================================
+
+_MAG_T_SCALE = _DAY
+_MAG_R_SCALE = 1.0e14
+_MAG_V_SCALE = 1.0e30
+_MAG_E_SCALE = 1.0e51
+_MAG_L_SCALE = _MAG_E_SCALE / _MAG_T_SCALE
+_LOG10_MAG_L_SCALE = _math.log10(_MAG_L_SCALE)
+
+
+def _scaled_log10_parameter(log10_value, scale, fp):
+    """Return ``10**log10_value / scale`` without huge intermediate values."""
+    return jnp.power(
+        jnp.asarray(10.0, dtype=fp),
+        jnp.asarray(log10_value, dtype=fp) - jnp.asarray(_math.log10(scale), dtype=fp),
+    )
 
 def _make_scan_step(mej_g, kappa, kappa_gamma, f_nickel, fp):
     """Return a scan-compatible step function closed over the physical parameters.
@@ -798,9 +836,9 @@ def _run_magnetar_ode(
 def _magnetar_impl(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -808,6 +846,9 @@ def _magnetar_impl(
     n_grid=2000,
 ):
     """Core ODE — returns log10(L_bol).  No JIT, safe for jax.vmap."""
+    fp = jnp.asarray(time).dtype
+    E_sn = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_E_sn, dtype=fp))
+    l0 = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_l0, dtype=fp))
     log10_out, _ = _run_magnetar_ode(
         time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
     )
@@ -822,9 +863,9 @@ def _magnetar_impl(
 def general_magnetar_driven_supernova_bolometric(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -845,12 +886,12 @@ def general_magnetar_driven_supernova_bolometric(
         Source-frame times at which to evaluate the model.
     mej : float, M_sun
         Ejecta mass.
-    E_sn : float, erg
-        Explosion kinetic energy.
+    log10_E_sn : float
+        Base-10 logarithm of explosion kinetic energy in erg.
     kappa : float, cm²/g
         Optical opacity.
-    l0 : float, erg/s
-        Initial magnetar spin-down luminosity.
+    log10_l0 : float
+        Base-10 logarithm of initial magnetar spin-down luminosity in erg/s.
     tau_sd : float, s
         Magnetar spin-down timescale.
     nn : float
@@ -876,9 +917,13 @@ def general_magnetar_driven_supernova_bolometric(
     """
     if solver == 'diffrax':
         log10_lbol, _ = _run_magnetar_ode_diffrax(
-            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+            time, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+            f_nickel, rtol, atol,
         )
     elif solver == 'euler':
+        fp = jnp.asarray(time).dtype
+        E_sn = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_E_sn, dtype=fp))
+        l0 = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_l0, dtype=fp))
         log10_lbol, _ = _run_magnetar_ode(
             time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
         )
@@ -895,9 +940,9 @@ def general_magnetar_driven_supernova_bolometric(
 def general_magnetar_driven_supernova_bolometric_and_vej(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -927,9 +972,13 @@ def general_magnetar_driven_supernova_bolometric_and_vej(
     """
     if solver == 'diffrax':
         return _run_magnetar_ode_diffrax(
-            time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+            time, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+            f_nickel, rtol, atol,
         )
     elif solver == 'euler':
+        fp = jnp.asarray(time).dtype
+        E_sn = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_E_sn, dtype=fp))
+        l0 = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_l0, dtype=fp))
         return _run_magnetar_ode(
             time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
         )
@@ -941,9 +990,9 @@ def general_magnetar_driven_supernova_bolometric_and_vej(
 def general_magnetar_driven_supernova_bolometric_batched(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -961,8 +1010,8 @@ def general_magnetar_driven_supernova_bolometric_batched(
     ----------
     time : array_like, shape (T,)
         Shared source-frame times in days (broadcast over all B samples).
-    mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma : array_like, shape (B,)
-        Physical parameters — one scalar value per sample.
+    mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma : array_like, shape (B,)
+        Physical/log-scaled parameters — one scalar value per sample.
     f_nickel : array_like, shape (B,), optional
         Ni-56 mass fractions.  Defaults to zeros for all samples if None.
     n_grid : int, optional
@@ -983,9 +1032,9 @@ def general_magnetar_driven_supernova_bolometric_batched(
         )
     )(
         mej_arr,
-        jnp.asarray(E_sn,        dtype=jnp.float64),
+        jnp.asarray(log10_E_sn,  dtype=jnp.float64),
         jnp.asarray(kappa,       dtype=jnp.float64),
-        jnp.asarray(l0,          dtype=jnp.float64),
+        jnp.asarray(log10_l0,    dtype=jnp.float64),
         jnp.asarray(tau_sd,      dtype=jnp.float64),
         jnp.asarray(nn,          dtype=jnp.float64),
         jnp.asarray(kappa_gamma, dtype=jnp.float64),
@@ -1094,12 +1143,158 @@ def _magnetar_vf_diffrax(t, y, args):
     return jnp.array([dgamma_dt, drdt, dV_dt, dE_dt], dtype=fp)
 
 
+def _magnetar_scaled_state_quantities(t_day, gamma, r_s, V_s, E_s, args):
+    """Shared scaled-state algebra for the Diffrax vector field and outputs.
+
+    State variables are dimensionless/scaled:
+    ``r_s = r / _MAG_R_SCALE``, ``V_s = V / _MAG_V_SCALE``,
+    ``E_s = E / _MAG_E_SCALE`` and the independent variable is days.  Luminosity
+    terms are in units of ``_MAG_L_SCALE = _MAG_E_SCALE / day``.
+    """
+    mej_msun, kappa, kappa_gamma, f_nickel, l0_s, tau_sd_day, nn = args
+    fp = gamma.dtype
+
+    c_day = jnp.asarray(_C * _MAG_T_SCALE / _MAG_R_SCALE, dtype=fp)
+    nmp_r3_over_msun = jnp.asarray(_N_ISM * _MP * _MAG_R_SCALE ** 3 / _MSUN, dtype=fp)
+    msun_c2_over_escale = jnp.asarray(_MSUN * _C ** 2 / _MAG_E_SCALE, dtype=fp)
+    msun_r_over_vscale = jnp.asarray(_MSUN * _MAG_R_SCALE / _MAG_V_SCALE, dtype=fp)
+    pressure_work_coeff = jnp.asarray(
+        _MAG_T_SCALE * _C * _MAG_R_SCALE ** 2 / _MAG_V_SCALE, dtype=fp
+    )
+    ni56_lum_s = jnp.asarray(_NI56_LUM / _MAG_L_SCALE, dtype=fp)
+    co56_lum_s = jnp.asarray(_CO56_LUM / _MAG_L_SCALE, dtype=fp)
+    ni56_life_day = jnp.asarray(_NI56_LIFE / _MAG_T_SCALE, dtype=fp)
+    co56_life_day = jnp.asarray(_CO56_LIFE / _MAG_T_SCALE, dtype=fp)
+
+    one = jnp.asarray(1.0, dtype=fp)
+    zero = jnp.asarray(0.0, dtype=fp)
+    eps = jnp.asarray(jnp.finfo(fp).eps, dtype=fp)
+    tiny = jnp.maximum(jnp.asarray(1e-15, dtype=fp), eps)
+    pi = jnp.asarray(jnp.pi, dtype=fp)
+
+    r_min = jnp.asarray(1e8 / _MAG_R_SCALE, dtype=fp)
+    V_min = jnp.asarray(1e24 / _MAG_V_SCALE, dtype=fp)
+    E_min = jnp.asarray(1e30 / _MAG_E_SCALE, dtype=fp)
+
+    gamma = jnp.maximum(gamma, one + tiny)
+    r_s = jnp.maximum(r_s, r_min)
+    V_s = jnp.maximum(V_s, V_min)
+    E_s = jnp.maximum(E_s, E_min)
+
+    beta_sq = jnp.maximum(one - one / gamma ** 2, jnp.asarray(1e-16, dtype=fp))
+    beta = jnp.sqrt(beta_sq)
+    dop = one / (gamma * jnp.maximum(one - beta, tiny))
+
+    exp_mag = (one + nn) / (one - nn)
+    mag_lum_s = l0_s * (one + t_day / tau_sd_day) ** exp_mag
+
+    nickel_msun = f_nickel * mej_msun
+    t_comov_day = dop * t_day
+    L_ni_s = nickel_msun * (
+        ni56_lum_s * jnp.exp(jnp.maximum(-t_comov_day / ni56_life_day, jnp.asarray(-80.0, dtype=fp)))
+        + co56_lum_s * jnp.exp(jnp.maximum(-t_comov_day / co56_life_day, jnp.asarray(-80.0, dtype=fp)))
+    )
+
+    tau = kappa * mej_msun * msun_r_over_vscale * r_s / (V_s * gamma)
+    r_ov_g_s = r_s / gamma
+    tau_safe = jnp.maximum(tau, tiny)
+    L_thin_s = E_s * c_day / r_ov_g_s
+    L_thick_s = E_s * c_day / (tau_safe * r_ov_g_s)
+    L_emit_s = jnp.where(tau <= one, L_thin_s, L_thick_s)
+    L_obs_s = L_emit_s * dop ** 2
+
+    vej_safe_cms = jnp.maximum(beta * jnp.asarray(_C, dtype=fp), jnp.asarray(1e5, dtype=fp))
+    prefactor_day2 = (
+        jnp.asarray(3.0, dtype=fp)
+        * kappa_gamma
+        * mej_msun
+        * jnp.asarray(_MSUN, dtype=fp)
+        / (jnp.asarray(4.0, dtype=fp) * pi * vej_safe_cms ** 2 * jnp.asarray(_MAG_T_SCALE ** 2, dtype=fp))
+    )
+    t_safe_day = jnp.maximum(t_day, one / jnp.asarray(_MAG_T_SCALE, dtype=fp))
+    eta_th = one - jnp.exp(-prefactor_day2 / t_safe_day ** 2)
+
+    beta_safe = jnp.maximum(beta, tiny)
+    one_mb = jnp.maximum(one - beta, tiny)
+    dr_s_dt = beta_safe * c_day / one_mb
+    dV_s_dt = (
+        jnp.asarray(4.0, dtype=fp)
+        * pi
+        * r_s ** 2
+        * beta_safe
+        * c_day
+        * dop
+        * jnp.asarray(_MAG_R_SCALE ** 3 / _MAG_V_SCALE, dtype=fp)
+    )
+
+    pressure_work_s = (
+        E_s
+        / (jnp.asarray(3.0, dtype=fp) * V_s)
+        * jnp.asarray(4.0, dtype=fp)
+        * pi
+        * r_s ** 2
+        * beta_safe
+        * pressure_work_coeff
+    )
+    dE_com_s = eta_th * dop ** (-2) * mag_lum_s + L_ni_s - L_emit_s - pressure_work_s
+    dE_s_dt = dE_com_s * dop
+
+    swept_mass_msun = (
+        jnp.asarray(4.0 / 3.0, dtype=fp) * pi * r_s ** 3 * nmp_r3_over_msun
+    )
+    dM_sw_msun_dt = (
+        jnp.asarray(4.0, dtype=fp)
+        * pi
+        * r_s ** 2
+        * nmp_r3_over_msun
+        * beta_safe
+        * c_day
+        / one_mb
+    )
+    dE_tot_s = eta_th * mag_lum_s + dop ** 2 * (L_ni_s - L_emit_s)
+    mass_sweep_power_s = (gamma ** 2 - one) * dM_sw_msun_dt * msun_c2_over_escale
+    denom_s = (
+        mej_msun * msun_c2_over_escale
+        + E_s
+        + jnp.asarray(2.0, dtype=fp) * gamma * swept_mass_msun * msun_c2_over_escale
+    )
+    denom_s = jnp.maximum(jnp.abs(denom_s), jnp.asarray(1e30 / _MAG_E_SCALE, dtype=fp))
+    dgamma_dt = (
+        dE_tot_s
+        - gamma * dop * dE_com_s
+        - mass_sweep_power_s
+    ) / denom_s
+
+    return {
+        'gamma': gamma,
+        'r_s': r_s,
+        'V_s': V_s,
+        'E_s': E_s,
+        'beta': beta,
+        'tau': tau,
+        'L_obs_s': L_obs_s,
+        'dgamma_dt': dgamma_dt,
+        'dr_s_dt': dr_s_dt,
+        'dV_s_dt': dV_s_dt,
+        'dE_s_dt': dE_s_dt,
+    }
+
+
+def _magnetar_vf_diffrax_scaled(t_day, y, args):
+    q = _magnetar_scaled_state_quantities(t_day, y[0], y[1], y[2], y[3], args)
+    fp = y.dtype
+    return jnp.array(
+        [q['dgamma_dt'], q['dr_s_dt'], q['dV_s_dt'], q['dE_s_dt']],
+        dtype=fp,
+    )
+
+
 def _run_magnetar_ode_diffrax(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -1121,56 +1316,64 @@ def _run_magnetar_ode_diffrax(
     """
     from diffrax import diffeqsolve, ODETerm, Tsit5, SaveAt, PIDController
 
-    fp     = jnp.float64
     fp_out = jnp.asarray(time).dtype
+    fp = fp_out if jnp.issubdtype(fp_out, jnp.floating) else jnp.float32
 
-    time_s_req = jnp.asarray(time, dtype=fp) * jnp.array(_DAY, dtype=fp)
+    time_day_req = jnp.asarray(time, dtype=fp)
 
     # Sort times for diffrax SaveAt (requires ascending order)
-    sort_idx    = jnp.argsort(time_s_req)
+    sort_idx    = jnp.argsort(time_day_req)
     unsort_idx  = jnp.argsort(sort_idx)
-    time_s_sort = time_s_req[sort_idx]
+    time_day_sort = time_day_req[sort_idx]
 
-    # Initial conditions (same as _run_magnetar_ode)
-    mej_g  = jnp.asarray(mej,   dtype=fp) * jnp.array(_MSUN, dtype=fp)
-    E_sn_f = jnp.asarray(E_sn,  dtype=fp)
-    c_f    = jnp.array(_C,      dtype=fp)
-    beta0  = jnp.sqrt(E_sn_f / (jnp.array(0.5, dtype=fp) * mej_g)) / c_f
+    mej_msun = jnp.asarray(mej, dtype=fp)
+    E_sn_s = _scaled_log10_parameter(log10_E_sn, _MAG_E_SCALE, fp)
+    l0_s = _scaled_log10_parameter(log10_l0, _MAG_L_SCALE, fp)
+    c_f = jnp.asarray(_C, dtype=fp)
+    msun_c2_over_escale = jnp.asarray(_MSUN * _C ** 2 / _MAG_E_SCALE, dtype=fp)
+
+    beta0  = jnp.sqrt(
+        E_sn_s / (jnp.asarray(0.5, dtype=fp) * mej_msun * msun_c2_over_escale)
+    )
     beta0  = jnp.minimum(beta0, jnp.array(0.9999, dtype=fp))
     gamma0 = jnp.array(1.0, dtype=fp) / jnp.sqrt(jnp.array(1.0, dtype=fp) - beta0**2)
-    E0     = jnp.array(0.5, dtype=fp) * beta0**2 * mej_g * c_f**2
-    r0     = jnp.array(_R0_CM, dtype=fp)
-    V0     = jnp.array(4.0/3.0, dtype=fp) * jnp.array(jnp.pi, dtype=fp) * r0**3
-    y0     = jnp.array([gamma0, r0, V0, E0], dtype=fp)
+    E0_s   = jnp.asarray(0.5, dtype=fp) * beta0 ** 2 * mej_msun * msun_c2_over_escale
+    r0_s   = jnp.asarray(_R0_CM / _MAG_R_SCALE, dtype=fp)
+    V0_s   = (
+        jnp.asarray(4.0 / 3.0, dtype=fp)
+        * jnp.asarray(jnp.pi, dtype=fp)
+        * jnp.asarray(_R0_CM ** 3 / _MAG_V_SCALE, dtype=fp)
+    )
+    y0     = jnp.array([gamma0, r0_s, V0_s, E0_s], dtype=fp)
 
     args = (
-        mej_g,
+        mej_msun,
         jnp.asarray(kappa,       dtype=fp),
         jnp.asarray(kappa_gamma, dtype=fp),
         jnp.asarray(f_nickel,    dtype=fp),
-        jnp.asarray(l0,          dtype=fp),
-        jnp.asarray(tau_sd,      dtype=fp),
+        l0_s,
+        jnp.asarray(tau_sd / _MAG_T_SCALE, dtype=fp),
         jnp.asarray(nn,          dtype=fp),
     )
 
     # Set t0 dynamically so SaveAt times are never before t0 (diffrax raises
     # ValueError if any save time falls outside [t0, t1]).
-    t0 = jnp.minimum(jnp.array(1.0, dtype=fp),
-                     time_s_sort[0] * jnp.array(0.9, dtype=fp))
+    t0 = jnp.minimum(jnp.array(1.0 / _MAG_T_SCALE, dtype=fp),
+                     time_day_sort[0] * jnp.array(0.9, dtype=fp))
     t1 = jnp.maximum(
-        time_s_sort[-1] * jnp.array(1.001, dtype=fp),
-        t0 + jnp.array(1.0, dtype=fp),
+        time_day_sort[-1] * jnp.array(1.001, dtype=fp),
+        t0 + jnp.array(1.0 / _MAG_T_SCALE, dtype=fp),
     )
 
     solution = diffeqsolve(
-        ODETerm(_magnetar_vf_diffrax),
+        ODETerm(_magnetar_vf_diffrax_scaled),
         Tsit5(),
         t0=t0,
         t1=t1,
-        dt0=jnp.array(10.0, dtype=fp),
+        dt0=jnp.array(10.0 / _MAG_T_SCALE, dtype=fp),
         y0=y0,
         args=args,
-        saveat=SaveAt(ts=time_s_sort),
+        saveat=SaveAt(ts=time_day_sort),
         stepsize_controller=PIDController(rtol=rtol, atol=atol),
         max_steps=262144,
         throw=False,
@@ -1178,30 +1381,19 @@ def _run_magnetar_ode_diffrax(
 
     # Extract saved state (shape: N_save × 4)
     gamma_out = solution.ys[:, 0]
-    r_out     = solution.ys[:, 1]
-    V_out     = solution.ys[:, 2]
-    E_out     = solution.ys[:, 3]
+    r_s_out   = solution.ys[:, 1]
+    V_s_out   = solution.ys[:, 2]
+    E_s_out   = solution.ys[:, 3]
 
-    # Derive L_obs and v_ej from saved state
-    beta_out  = jnp.sqrt(
-        jnp.maximum(jnp.array(1.0, dtype=fp) - jnp.array(1.0, dtype=fp) / gamma_out**2,
-                    jnp.array(0.0, dtype=fp))
+    q_out = _magnetar_scaled_state_quantities(
+        time_day_sort, gamma_out, r_s_out, V_s_out, E_s_out, args
     )
-    dop_out   = jnp.array(1.0, dtype=fp) / (
-        gamma_out * jnp.maximum(jnp.array(1.0, dtype=fp) - beta_out, jnp.array(1e-15, dtype=fp))
+    beta_out = q_out['beta']
+    lbol_safe_s = jnp.maximum(
+        q_out['L_obs_s'],
+        jnp.asarray(1e25 / _MAG_L_SCALE, dtype=fp),
     )
-    tau_out   = (jnp.asarray(kappa, dtype=fp)
-                 * (mej_g / V_out)
-                 * (r_out / gamma_out))
-    r_ov_g    = r_out / gamma_out
-    tau_safe  = jnp.maximum(tau_out, jnp.array(1e-15, dtype=fp))
-    L_thin    = E_out * c_f / r_ov_g
-    L_thick   = E_out * c_f / (tau_safe * r_ov_g)
-    L_emit    = jnp.where(tau_out <= jnp.array(1.0, dtype=fp), L_thin, L_thick)
-    L_obs     = L_emit * dop_out**2
-
-    lbol_safe     = jnp.maximum(L_obs, jnp.array(1e25, dtype=fp))
-    log10_lbol    = jnp.log10(lbol_safe)
+    log10_lbol = jnp.log10(lbol_safe_s) + jnp.asarray(_LOG10_MAG_L_SCALE, dtype=fp)
     vej_kms_out   = beta_out * c_f / jnp.array(1e5, dtype=fp)
 
     # Unsort to restore original time ordering
@@ -1219,9 +1411,9 @@ def _run_magnetar_ode_diffrax(
 def general_magnetar_driven_supernova_bolometric_diffrax(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -1248,7 +1440,8 @@ def general_magnetar_driven_supernova_bolometric_diffrax(
     log10_lbol : jnp.ndarray  — log10(L_bol) in erg/s
     """
     log10_lbol, _ = _run_magnetar_ode_diffrax(
-        time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        time, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+        f_nickel, rtol, atol,
     )
     return log10_lbol
 
@@ -1264,9 +1457,9 @@ def general_magnetar_driven_supernova(
     time,
     frequency,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -1300,9 +1493,9 @@ def general_magnetar_driven_supernova(
     time : (N,) observer-frame days
     frequency : (N,) observer-frame Hz
     mej : float, M_sun
-    E_sn : float, erg
+    log10_E_sn : float
     kappa : float, cm²/g
-    l0 : float, erg/s
+    log10_l0 : float
     tau_sd : float, s
     nn : float
     kappa_gamma : float, cm²/g
@@ -1338,9 +1531,12 @@ def general_magnetar_driven_supernova(
     # 2. ODE
     if solver == 'diffrax':
         log10_lbol, vej_kms = _run_magnetar_ode_diffrax(
-            time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+            time_src, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+            f_nickel, rtol, atol,
         )
     elif solver == 'euler':
+        E_sn = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_E_sn, dtype=fp))
+        l0 = jnp.power(jnp.asarray(10.0, dtype=fp), jnp.asarray(log10_l0, dtype=fp))
         log10_lbol, vej_kms = _run_magnetar_ode(
             time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, n_grid
         )
@@ -1377,9 +1573,9 @@ def general_magnetar_driven_supernova_diffrax(
     time,
     frequency,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -1409,7 +1605,7 @@ def general_magnetar_driven_supernova_diffrax(
     -------
     F_mjy : (N,) mJy
     """
-    fp = jnp.float64
+    fp = jnp.asarray(time).dtype
 
     freq  = jnp.asarray(frequency, dtype=fp)
     t_obs = jnp.asarray(time,      dtype=fp)
@@ -1419,7 +1615,8 @@ def general_magnetar_driven_supernova_diffrax(
     time_src = t_obs / (jnp.array(1.0, dtype=fp) + z)
 
     log10_lbol, vej_kms = _run_magnetar_ode_diffrax(
-        time_src, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        time_src, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+        f_nickel, rtol, atol,
     )
 
     T_ph, log10_r_ph = compute_temperature_floor_log10(
@@ -1442,9 +1639,9 @@ def general_magnetar_driven_supernova_diffrax(
 def general_magnetar_driven_supernova_bolometric_and_vej_diffrax(
     time,
     mej,
-    E_sn,
+    log10_E_sn,
     kappa,
-    l0,
+    log10_l0,
     tau_sd,
     nn,
     kappa_gamma,
@@ -1470,5 +1667,516 @@ def general_magnetar_driven_supernova_bolometric_and_vej_diffrax(
     vej_kms : jnp.ndarray  — ejecta velocity in km/s
     """
     return _run_magnetar_ode_diffrax(
-        time, mej, E_sn, kappa, l0, tau_sd, nn, kappa_gamma, f_nickel, rtol, atol
+        time, mej, log10_E_sn, kappa, log10_l0, tau_sd, nn, kappa_gamma,
+        f_nickel, rtol, atol,
     )
+
+
+
+# ---------------------------------------------------------------------------
+# CSM + nickel multiband model with CutoffBlackbody SED
+# ---------------------------------------------------------------------------
+
+@citation_wrapper('https://ui.adsabs.harvard.edu/abs/2013ApJ...773...76C/abstract,'
+                  'https://ui.adsabs.harvard.edu/abs/2017ApJ...849...70V/abstract,'
+                  'https://ui.adsabs.harvard.edu/abs/2020RNAAS...4...16J/abstract,'
+                  'https://ui.adsabs.harvard.edu/abs/1982ApJ...253..785A/abstract')
+@jit
+def csm_nickel_spectra(
+    redshift,
+    lum_dist,
+    mej,
+    f_nickel,
+    csm_mass,
+    vej,
+    eta,
+    rho,
+    kappa,
+    kappa_gamma,
+    r0,
+    temperature_floor=3000.0,
+    cutoff_wavelength=3000.0,
+    absorption_index=1.0,
+):
+    """Multiband CSM-interaction + nickel light curve with CutoffBlackbody SED.
+
+    Combines the Chatzopoulos CSM interaction engine with Ni/Co radioactive
+    decay heating, diffused through the combined ejecta+CSM envelope, then
+    passed through a TemperatureFloor photosphere and CutoffBlackbody SED.
+
+    CSM coefficients are interpolated in eta at fixed nn=12 (standard SN
+    ejecta outer slope), making eta a freely differentiable JAX parameter.
+
+    Parameters
+    ----------
+    redshift : float
+    lum_dist : float, cm
+    mej : float, M_sun — ejecta mass
+    f_nickel : float — nickel mass fraction of ejecta
+    csm_mass : float, M_sun — total CSM mass
+    vej : float, km/s — ejecta velocity
+    eta : float — CSM density profile exponent (0=uniform, 2=wind)
+    rho : float, g/cm³ — CSM density amplitude at r0
+    kappa : float, cm²/g — optical opacity
+    kappa_gamma : float, cm²/g — gamma-ray opacity for Ni thermalisation
+    r0 : float, AU — inner CSM radius
+    temperature_floor : float, K — minimum photosphere temperature
+    cutoff_wavelength : float, Å — UV cutoff for CutoffBlackbody SED
+    absorption_index : float — UV power-law suppression index
+
+    Returns
+    -------
+    namedtuple with fields ``time`` (observer-frame days), ``lambdas``
+    (observer-frame Å), ``spectra`` (N_time × N_lambda, erg/s/cm²/Å).
+    """
+    from redback_jax.sed import cutoff_blackbody_flux_density as _cbd_fd
+
+    fp = jnp.float64
+
+    # Dense grids — source frame
+    # lambda_obs: extended to 25000 Å to cover NIR bands (2MASS J/H/Ks, etc.)
+    lambda_obs  = jnp.geomspace(jnp.array(500.0,  dtype=fp),
+                                 jnp.array(25000.0, dtype=fp), 50)
+    time_source = jnp.geomspace(jnp.array(0.1,    dtype=fp),
+                                 jnp.array(2000.0,  dtype=fp), 200)
+    dense_times = jnp.linspace( jnp.array(0.1,    dtype=fp),
+                                 jnp.array(2100.0,  dtype=fp), 1000)
+
+    # Interpolate shock coefficients for nn=12 at the requested eta.
+    eta_f = jnp.asarray(eta, dtype=fp)
+    AA    = jnp.interp(eta_f, _csm_eta_jax, _csm_AA_nn12)
+    Bf    = jnp.interp(eta_f, _csm_eta_jax, _csm_Bf_nn12)
+    Br    = jnp.interp(eta_f, _csm_eta_jax, _csm_Br_nn12)
+
+    # CSM engine on the dense grid (returns scalars r_photosphere, mass_csm_threshold)
+    dense_lbol_csm, r_photosphere, mass_csm_threshold = _csm_engine(
+        dense_times,
+        jnp.asarray(mej,      dtype=fp),
+        jnp.asarray(csm_mass, dtype=fp),
+        jnp.asarray(vej,      dtype=fp),
+        eta_f,
+        jnp.asarray(rho,      dtype=fp),
+        jnp.asarray(kappa,    dtype=fp),
+        jnp.asarray(r0,       dtype=fp),
+        12.0, AA, Bf, Br, 1.0, 1.0,   # nn=12, delta=1, efficiency=1
+    )
+
+    # Nickel+cobalt diffusion through combined ejecta+swept-CSM envelope
+    mej_eff      = jnp.asarray(mej, dtype=fp) + mass_csm_threshold / jnp.array(_SOLAR_MASS, dtype=fp)
+    log10_nickel = _diffused_nickelcobalt_log10_luminosity(
+        dense_times, f_nickel, mej_eff,
+        vej=jnp.asarray(vej,          dtype=fp),
+        kappa=jnp.asarray(kappa,       dtype=fp),
+        kappa_gamma=jnp.asarray(kappa_gamma, dtype=fp),
+    )
+    dense_lbol_nickel = jnp.power(jnp.array(10.0, dtype=fp), log10_nickel)
+
+    # Total bolometric luminosity + CSM diffusion
+    dense_lbol_total = dense_lbol_csm + dense_lbol_nickel
+    log10_dense = jnp.log10(jnp.maximum(dense_lbol_total, jnp.array(1e30, dtype=fp)))
+
+    log10_lbol = csm_diffusion_convert_luminosity(
+        time=time_source,
+        dense_times=dense_times,
+        log10_luminosity=log10_dense,
+        kappa=jnp.asarray(kappa, dtype=fp),
+        r_photosphere=r_photosphere,
+        mass_csm_threshold=mass_csm_threshold,
+    )
+
+    # TemperatureFloor photosphere → T(t), r_ph(t)
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_source,
+        log10_lbol,
+        jnp.asarray(vej, dtype=fp),
+        jnp.asarray(temperature_floor, dtype=fp),
+    )
+    r_ph = jnp.power(jnp.array(10.0, dtype=fp), log10_r_ph)
+    lbol = jnp.power(jnp.array(10.0, dtype=fp), log10_lbol)
+
+    # CutoffBlackbody SED: source-frame frequencies from observer-frame wavelengths
+    z_f          = jnp.asarray(redshift, dtype=fp)
+    lambda_src   = lambda_obs / (jnp.array(1.0, dtype=fp) + z_f)          # Å, source frame
+    freq_src     = jnp.array(_SPEED_OF_LIGHT, dtype=fp) / (lambda_src * jnp.array(1e-8, dtype=fp))
+    dl_f         = jnp.asarray(lum_dist, dtype=fp)
+    cw_f         = jnp.asarray(cutoff_wavelength, dtype=fp)
+    ai_f         = jnp.asarray(absorption_index, dtype=fp)
+    N_lam        = lambda_obs.shape[0]
+
+    def _spec_one_time(T_i, r_i, L_i):
+        return _cbd_fd(
+            freq_src,
+            jnp.broadcast_to(L_i, (N_lam,)),
+            jnp.broadcast_to(T_i, (N_lam,)),
+            jnp.broadcast_to(r_i, (N_lam,)),
+            dl_f, cw_f, ai_f,
+        )  # (N_lam,) mJy
+
+    spectra_mjy = jax.vmap(_spec_one_time)(T_ph, r_ph, lbol)   # (N_time, N_lam) mJy
+
+    # mJy → erg/s/cm²/Å,  then apply (1+z) observer-frame correction
+    _C_AA    = jnp.array(2.998e18, dtype=fp)   # Å/s
+    spectra  = (spectra_mjy * jnp.array(1e-26, dtype=fp)
+                * _C_AA / (lambda_obs[None, :] ** 2))
+    spectra  = spectra * (jnp.array(1.0, dtype=fp) + z_f)
+
+    # Return observer-frame time (days since explosion in observer frame).
+    # The likelihood queries at t_obs_since_t0 = obs_times - t0 to match.
+    time_obs = time_source * (jnp.array(1.0, dtype=fp) + z_f)
+
+    return namedtuple('output', ['time', 'lambdas', 'spectra'])(
+        time=time_obs,
+        lambdas=lambda_obs,
+        spectra=spectra,
+    )
+
+
+def _csm_nickel_direct_photometry(
+    obs_source_time,
+    obs_band_idx,
+    bridges,
+    redshift,
+    lum_dist,
+    mej,
+    f_nickel,
+    csm_mass,
+    vej,
+    eta,
+    rho,
+    kappa,
+    kappa_gamma,
+    r0,
+    temperature_floor=3000.0,
+    cutoff_wavelength=3000.0,
+    absorption_index=1.0,
+):
+    """Direct photometry evaluation of csm_nickel_spectra.
+
+    Identical physics to csm_nickel_spectra but bypasses the (n_time × n_lambda)
+    spectra cube.  Instead, the diffusion + temperature-floor are evaluated at the
+    actual observation times, and the CutoffBlackbody SED is integrated over each
+    band's precomputed quadrature grid in a single vmap.
+
+    Memory cost: O(n_obs × max_band_pts) instead of O(n_time_grid × n_lambda_grid),
+    giving ~20× reduction for typical SLSNe and enabling n_live=500 on a 16 GB GPU.
+    """
+    from redback_jax.sed import cutoff_blackbody_flux_density as _cbd_fd
+    from jax_supernovae.constants import HC_ERG_AA
+
+    fp = jnp.float64
+
+    # ---- Physics (same dense grid as the spectra version) ----
+    dense_times = jnp.linspace(jnp.array(0.1, fp), jnp.array(2100.0, fp), 1000)
+
+    eta_f = jnp.asarray(eta, fp)
+    AA    = jnp.interp(eta_f, _csm_eta_jax, _csm_AA_nn12)
+    Bf    = jnp.interp(eta_f, _csm_eta_jax, _csm_Bf_nn12)
+    Br    = jnp.interp(eta_f, _csm_eta_jax, _csm_Br_nn12)
+
+    dense_lbol_csm, r_photosphere, mass_csm_threshold = _csm_engine(
+        dense_times,
+        jnp.asarray(mej,      fp), jnp.asarray(csm_mass, fp),
+        jnp.asarray(vej,      fp), eta_f,
+        jnp.asarray(rho,      fp), jnp.asarray(kappa,    fp),
+        jnp.asarray(r0,       fp),
+        12.0, AA, Bf, Br, 1.0, 1.0,
+    )
+
+    mej_eff = jnp.asarray(mej, fp) + mass_csm_threshold / jnp.array(_SOLAR_MASS, fp)
+    log10_nickel = _diffused_nickelcobalt_log10_luminosity(
+        dense_times, f_nickel, mej_eff,
+        vej=jnp.asarray(vej,         fp),
+        kappa=jnp.asarray(kappa,      fp),
+        kappa_gamma=jnp.asarray(kappa_gamma, fp),
+    )
+    dense_lbol_total = dense_lbol_csm + jnp.power(jnp.array(10.0, fp), log10_nickel)
+    log10_dense      = jnp.log10(jnp.maximum(dense_lbol_total, jnp.array(1e30, fp)))
+
+    # Diffusion evaluated AT observation times (no output time grid needed)
+    obs_t = jnp.asarray(obs_source_time, fp)
+    log10_lbol_obs = csm_diffusion_convert_luminosity(
+        time=obs_t, dense_times=dense_times, log10_luminosity=log10_dense,
+        kappa=jnp.asarray(kappa, fp),
+        r_photosphere=r_photosphere, mass_csm_threshold=mass_csm_threshold,
+    )
+    T_ph_obs, log10_r_ph_obs = compute_temperature_floor_log10(
+        obs_t, log10_lbol_obs,
+        jnp.asarray(vej, fp), jnp.asarray(temperature_floor, fp),
+    )
+    r_ph_obs  = jnp.power(jnp.array(10.0, fp), log10_r_ph_obs)
+    lbol_obs  = jnp.power(jnp.array(10.0, fp), log10_lbol_obs)
+
+    # ---- Stack bridge arrays (Python at trace time → XLA constants) ----
+    max_wlen = max(len(b['wave']) for b in bridges)
+
+    def _pad_edge(a): return jnp.pad(a, (0, max_wlen - len(a)), mode='edge') if len(a) < max_wlen else jnp.asarray(a, fp)
+    def _pad_zero(a): return jnp.pad(a, (0, max_wlen - len(a)))               if len(a) < max_wlen else jnp.asarray(a, fp)
+
+    waves_s  = jnp.stack([_pad_edge(jnp.asarray(b['wave'],          fp)) for b in bridges])
+    trans_s  = jnp.stack([_pad_zero(jnp.asarray(b['trans'],         fp)) for b in bridges])
+    dwaves_s = jnp.array([float(b['dwave'])                              for b in bridges], dtype=fp)
+    zpbf_s   = jnp.array([float(b['zpbandflux_ab'])                     for b in bridges], dtype=fp)
+
+    z_f  = jnp.asarray(redshift,          fp)
+    dl_f = jnp.asarray(lum_dist,          fp)
+    cw_f = jnp.asarray(cutoff_wavelength, fp)
+    ai_f = jnp.asarray(absorption_index,  fp)
+    _C_AA   = jnp.array(2.998e18, fp)
+    _HC     = jnp.array(HC_ERG_AA, fp)
+
+    def _one_obs(T_i, r_i, L_i, band_idx):
+        wave_b  = waves_s[band_idx]              # (max_wlen,) observer-frame Å
+        trans_b = trans_s[band_idx]              # (max_wlen,)
+        dwave_b = dwaves_s[band_idx]             # scalar
+        zpbf_b  = zpbf_s[band_idx]              # scalar
+
+        # Source-frame frequencies (matches spectra version exactly)
+        lam_src = wave_b / (jnp.array(1.0, fp) + z_f)
+        freq_s  = jnp.array(_SPEED_OF_LIGHT, fp) / (lam_src * jnp.array(1e-8, fp))
+
+        # CutoffBlackbody SED at each band wavelength (mJy)
+        f_mjy = _cbd_fd(
+            freq_s,
+            jnp.broadcast_to(L_i, (max_wlen,)),
+            jnp.broadcast_to(T_i, (max_wlen,)),
+            jnp.broadcast_to(r_i, (max_wlen,)),
+            dl_f, cw_f, ai_f,
+        )
+
+        # mJy → observer-frame erg/s/cm²/Å (same conversion as spectra version)
+        f_lam = f_mjy * jnp.array(1e-26, fp) * _C_AA / wave_b ** 2 * (jnp.array(1.0, fp) + z_f)
+
+        # Band flux: ∫ λ T(λ) F(λ) dλ / hc  (matches bandflux_integration exactly)
+        bandflux = jnp.sum(wave_b * trans_b * f_lam) * dwave_b / _HC
+
+        return bandflux / zpbf_b
+
+    return jax.vmap(_one_obs)(T_ph_obs, r_ph_obs, lbol_obs, obs_band_idx)
+
+
+csm_nickel_spectra._redback_jax_direct_photometry = _csm_nickel_direct_photometry
+
+
+def _csm_nickel_grid_photometry(
+    obs_source_time,
+    obs_band_idx,
+    bridges,
+    redshift,
+    lum_dist,
+    mej,
+    f_nickel,
+    csm_mass,
+    vej,
+    eta,
+    rho,
+    kappa,
+    kappa_gamma,
+    r0,
+    temperature_floor=3000.0,
+    cutoff_wavelength=3000.0,
+    absorption_index=1.0,
+    _time_observer_frame_grid=None,
+):
+    """CSM+nickel photometry through bandpasses without a spectra cube."""
+    from redback_jax.models.spectra_model import (
+        _DEFAULT_GRID_BANDPASS_POINTS,
+        _cutoff_bandflux_grid_from_state,
+        _interp_bandflux_grid,
+    )
+
+    fp = jnp.float64
+    obs_t = jnp.asarray(obs_source_time, fp)
+    z_f = jnp.asarray(redshift, fp)
+    if _time_observer_frame_grid is None:
+        time_source = jnp.geomspace(jnp.array(0.1, fp), jnp.array(2000.0, fp), 200)
+    else:
+        time_source = jnp.asarray(_time_observer_frame_grid, fp) / (
+            jnp.array(1.0, fp) + z_f
+        )
+    dense_times = jnp.linspace(jnp.array(0.1, fp), jnp.array(2100.0, fp), 1000)
+
+    eta_f = jnp.asarray(eta, fp)
+    AA = jnp.interp(eta_f, _csm_eta_jax, _csm_AA_nn12)
+    Bf = jnp.interp(eta_f, _csm_eta_jax, _csm_Bf_nn12)
+    Br = jnp.interp(eta_f, _csm_eta_jax, _csm_Br_nn12)
+
+    dense_lbol_csm, r_photosphere, mass_csm_threshold = _csm_engine(
+        dense_times,
+        jnp.asarray(mej, fp),
+        jnp.asarray(csm_mass, fp),
+        jnp.asarray(vej, fp),
+        eta_f,
+        jnp.asarray(rho, fp),
+        jnp.asarray(kappa, fp),
+        jnp.asarray(r0, fp),
+        12.0,
+        AA,
+        Bf,
+        Br,
+        1.0,
+        1.0,
+    )
+
+    mej_eff = jnp.asarray(mej, fp) + mass_csm_threshold / jnp.array(_SOLAR_MASS, fp)
+    log10_nickel = _diffused_nickelcobalt_log10_luminosity(
+        dense_times,
+        f_nickel,
+        mej_eff,
+        vej=jnp.asarray(vej, fp),
+        kappa=jnp.asarray(kappa, fp),
+        kappa_gamma=jnp.asarray(kappa_gamma, fp),
+    )
+    dense_lbol_total = dense_lbol_csm + jnp.power(jnp.array(10.0, fp), log10_nickel)
+    log10_dense = jnp.log10(jnp.maximum(dense_lbol_total, jnp.array(1e30, fp)))
+
+    log10_lbol = csm_diffusion_convert_luminosity(
+        time=time_source,
+        dense_times=dense_times,
+        log10_luminosity=log10_dense,
+        kappa=jnp.asarray(kappa, fp),
+        r_photosphere=r_photosphere,
+        mass_csm_threshold=mass_csm_threshold,
+    )
+
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_source,
+        log10_lbol,
+        jnp.asarray(vej, fp),
+        jnp.asarray(temperature_floor, fp),
+    )
+
+    valid = obs_t >= time_source[0]
+    flux_grid = _cutoff_bandflux_grid_from_state(
+        source_time_grid=time_source,
+        bridges=bridges,
+        redshift=redshift,
+        lum_dist=lum_dist,
+        log10_lbol_grid=log10_lbol,
+        temperature_grid=T_ph,
+        log10_r_grid=log10_r_ph,
+        cutoff_wavelength=cutoff_wavelength,
+        alpha_uv=absorption_index,
+        max_bandpass_points=_DEFAULT_GRID_BANDPASS_POINTS,
+    )
+    norm_fluxes = _interp_bandflux_grid(obs_t, obs_band_idx, time_source, flux_grid)
+    return jnp.where(valid, norm_fluxes, 0.0)
+
+
+csm_nickel_spectra._redback_jax_grid_photometry = _csm_nickel_grid_photometry
+
+
+@citation_wrapper(
+    'https://ui.adsabs.harvard.edu/abs/2012ApJ...746..121C/abstract,'
+    'https://ui.adsabs.harvard.edu/abs/2017ApJ...850...55N/abstract'
+)
+@jit
+def csm_nickel_flux_density(
+    time,
+    frequency,
+    redshift,
+    lum_dist,
+    mej,
+    f_nickel,
+    csm_mass,
+    vej,
+    eta,
+    rho,
+    kappa,
+    kappa_gamma,
+    r0,
+    cutoff_wavelength,
+    absorption_index,
+    temperature_floor,
+):
+    """CSM+nickel flux density model for use with ``FluxDensityLikelihood``.
+
+    Same physics as ``csm_nickel_spectra`` but evaluates the SED directly at
+    each observation's (time, frequency) pair instead of building a full
+    ``(n_time, n_lam)`` spectral cube.  This avoids the ``timeseries_multiband_flux``
+    bandpass integration and is typically 5–10× faster per likelihood evaluation.
+
+    Parameters
+    ----------
+    time : (N,) observer-frame days since explosion
+    frequency : (N,) Hz, observer-frame
+    redshift : float
+    lum_dist : float, cm
+    mej, f_nickel, csm_mass, vej, eta, rho, kappa, kappa_gamma, r0 : floats
+        Same physical parameters as ``csm_nickel_spectra``.
+    cutoff_wavelength : float, Å
+    absorption_index : float
+    temperature_floor : float, K
+
+    Returns
+    -------
+    F_mjy : (N,) mJy  observer-frame flux density
+    """
+    from redback_jax.sed import cutoff_blackbody_flux_density as _cbd_fd
+
+    fp = jnp.float64
+    t_obs  = jnp.asarray(time,      dtype=fp)
+    nu_obs = jnp.asarray(frequency, dtype=fp)
+    z_f    = jnp.asarray(redshift,  dtype=fp)
+
+    one_pz = jnp.array(1.0, fp) + z_f
+    t_src  = t_obs  / one_pz       # source-frame time since explosion
+    nu_src = nu_obs * one_pz       # source-frame frequency
+
+    # Dense source-frame grid for bolometric luminosity
+    dense_times       = jnp.linspace(jnp.array(0.1, fp), jnp.array(2100.0, fp), 1000)
+    time_source_grid  = jnp.geomspace(jnp.array(0.1,  fp), jnp.array(2000.0, fp), 200)
+
+    # CSM shock coefficients at requested eta
+    eta_f = jnp.asarray(eta, dtype=fp)
+    AA    = jnp.interp(eta_f, _csm_eta_jax, _csm_AA_nn12)
+    Bf    = jnp.interp(eta_f, _csm_eta_jax, _csm_Bf_nn12)
+    Br    = jnp.interp(eta_f, _csm_eta_jax, _csm_Br_nn12)
+
+    dense_lbol_csm, r_photosphere, mass_csm_threshold = _csm_engine(
+        dense_times,
+        jnp.asarray(mej,      fp), jnp.asarray(csm_mass, fp),
+        jnp.asarray(vej,      fp), eta_f,
+        jnp.asarray(rho,      fp), jnp.asarray(kappa, fp),
+        jnp.asarray(r0,       fp),
+        12.0, AA, Bf, Br, 1.0, 1.0,
+    )
+
+    mej_eff      = jnp.asarray(mej, fp) + mass_csm_threshold / jnp.array(_SOLAR_MASS, fp)
+    log10_nickel = _diffused_nickelcobalt_log10_luminosity(
+        dense_times, f_nickel, mej_eff,
+        vej=jnp.asarray(vej,         fp),
+        kappa=jnp.asarray(kappa,     fp),
+        kappa_gamma=jnp.asarray(kappa_gamma, fp),
+    )
+    dense_lbol_total = (jnp.power(jnp.array(10.0, fp), log10_nickel)
+                        + dense_lbol_csm)
+    log10_dense = jnp.log10(jnp.maximum(dense_lbol_total, jnp.array(1e30, fp)))
+
+    log10_lbol = csm_diffusion_convert_luminosity(
+        time=time_source_grid,
+        dense_times=dense_times,
+        log10_luminosity=log10_dense,
+        kappa=jnp.asarray(kappa, fp),
+        r_photosphere=r_photosphere,
+        mass_csm_threshold=mass_csm_threshold,
+    )
+
+    T_ph, log10_r_ph = compute_temperature_floor_log10(
+        time_source_grid, log10_lbol,
+        jnp.asarray(vej,              fp),
+        jnp.asarray(temperature_floor, fp),
+    )
+    r_ph = jnp.power(jnp.array(10.0, fp), log10_r_ph)
+    lbol = jnp.power(jnp.array(10.0, fp), log10_lbol)
+
+    # Interpolate to observation times (source frame)
+    T_at_obs  = jnp.interp(t_src, time_source_grid, T_ph,  left=jnp.array(0.0, fp))
+    r_at_obs  = jnp.interp(t_src, time_source_grid, r_ph,  left=jnp.array(0.0, fp))
+    L_at_obs  = jnp.interp(t_src, time_source_grid, lbol,  left=jnp.array(0.0, fp))
+
+    dl_f  = jnp.asarray(lum_dist,         fp)
+    cw_f  = jnp.asarray(cutoff_wavelength, fp)
+    ai_f  = jnp.asarray(absorption_index,  fp)
+
+    F_mjy = _cbd_fd(nu_src, L_at_obs, T_at_obs, r_at_obs, dl_f, cw_f, ai_f)
+    return F_mjy * one_pz

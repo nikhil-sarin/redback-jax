@@ -221,3 +221,5 @@ examples/general_magnetar_fitting.ipynb
 
 # Notebooks (local development only, not tracked)
 notebooks/
+uv.lock
+.aider*
