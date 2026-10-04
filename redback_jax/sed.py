@@ -137,6 +137,59 @@ def cutoff_blackbody_norm(
     return norm
 
 
+@jit
+def cutoff_blackbody_log10_norm(
+    log10_luminosity,
+    temperature,
+    r_photosphere,
+    cutoff_wavelength_ang,
+    alpha_uv=1.0,
+):
+    """Log10 luminosity-conserving cutoff-blackbody normalisation.
+
+    This is algebraically the same normalisation as
+    ``cutoff_blackbody_norm`` but avoids underflow when running in float32.
+    """
+    from jax.scipy.special import gammaincc, gamma as _gamma_sp
+
+    fp = temperature.dtype
+    lc = jnp.asarray(cutoff_wavelength_ang * 1e-8, dtype=fp)
+    fc_no_ang = jnp.asarray(_FLUX_CONST / 1e-8, dtype=fp)
+
+    nxcs = jnp.asarray(_NXCS, dtype=fp)
+    tp = temperature[:, None]
+    z = nxcs / (lc * tp)
+
+    alpha = jnp.clip(jnp.asarray(alpha_uv, dtype=fp), 0.0, 3.99)
+    order = jnp.asarray(4.0, dtype=fp) - alpha
+    upper_gamma = _gamma_sp(order) * gammaincc(order, z)
+    term_1 = jnp.power(tp, jnp.asarray(3.0, dtype=fp) - alpha) * upper_gamma / (
+        jnp.power(nxcs, jnp.asarray(4.0, dtype=fp) - alpha) * jnp.power(lc, alpha)
+    )
+
+    c1 = jnp.exp(jnp.clip(-z, jnp.asarray(-80.0, dtype=fp), jnp.asarray(0.0, dtype=fp)))
+    tp2 = tp ** 2
+    tp3 = tp ** 3
+    term_2 = (
+        (6.0 * tp3
+         - c1 * (nxcs ** 3
+                 + 3.0 * nxcs ** 2 * lc * tp
+                 + 6.0 * (nxcs * lc ** 2 * tp2 + lc ** 3 * tp3))
+         / lc ** 3)
+        / nxcs ** 4
+    )
+
+    f_blue_reds = jnp.sum(term_1 + term_2, axis=1)
+    tiny = jnp.asarray(jnp.finfo(fp).tiny, dtype=fp)
+    return (
+        log10_luminosity
+        - jnp.log10(fc_no_ang)
+        - jnp.asarray(2.0, dtype=fp) * jnp.log10(r_photosphere)
+        - jnp.log10(temperature)
+        - jnp.log10(jnp.maximum(f_blue_reds, tiny))
+    )
+
+
 # ---------------------------------------------------------------------------
 # Full flux density  (1:1 translation of _set_sed + _SED.flux_density)
 # ---------------------------------------------------------------------------
@@ -225,3 +278,50 @@ def cutoff_blackbody_flux_density(
     lam_ang = lam_cm * jnp.asarray(1e8, dtype=fp)    # cm → Å
     F_nu    = sed * lam_ang / frequency / (jnp.asarray(_4PI, dtype=fp) * dl2)
     return F_nu * jnp.asarray(1e26, dtype=fp)         # → mJy
+
+
+@jit
+def cutoff_blackbody_flux_density_with_norm(
+    frequency,
+    temperature,
+    r_photosphere,
+    luminosity_distance,
+    norm,
+    cutoff_wavelength_ang=3000.0,
+    alpha_uv=1.0,
+):
+    """Observed cutoff-blackbody flux density using a precomputed SED norm.
+
+    ``cutoff_blackbody_norm`` depends only on luminosity, temperature, and
+    photosphere radius. Photometric band grids evaluate many wavelengths at the
+    same epoch, so computing the norm once per epoch and broadcasting it avoids
+    repeating the expensive incomplete-gamma normalization for each wavelength.
+    """
+    fp = temperature.dtype
+
+    fc = jnp.asarray(_FLUX_CONST, dtype=fp)
+    xc = jnp.asarray(_X_CONST, dtype=fp)
+    c_cm = jnp.asarray(_C_CM, dtype=fp)
+    lc = jnp.asarray(cutoff_wavelength_ang * 1e-8, dtype=fp)
+    dl2 = jnp.asarray(luminosity_distance, dtype=fp) ** 2
+
+    lam_cm = c_cm / frequency
+    x = xc / (lam_cm * temperature)
+    x = jnp.clip(
+        x,
+        jnp.asarray(1e-10, dtype=fp),
+        jnp.asarray(500.0, dtype=fp),
+    )
+
+    alpha = jnp.clip(jnp.asarray(alpha_uv, dtype=fp), 0.0, 3.99)
+    r2 = r_photosphere ** 2
+    planck_r2 = jnp.where(
+        lam_cm < lc,
+        r2 / (jnp.power(lc, alpha) * jnp.power(lam_cm, jnp.asarray(5.0, dtype=fp) - alpha)),
+        r2 / lam_cm ** 5,
+    )
+    sed = fc * planck_r2 / jnp.expm1(x) * norm
+
+    lam_ang = lam_cm * jnp.asarray(1e8, dtype=fp)
+    F_nu = sed * lam_ang / frequency / (jnp.asarray(_4PI, dtype=fp) * dl2)
+    return F_nu * jnp.asarray(1e26, dtype=fp)

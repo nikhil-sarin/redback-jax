@@ -4,7 +4,7 @@ Tests for redback_jax.models.general_magnetar
 Checks:
   1. Output shape, dtype, and finite-value guarantees.
   2. Monotonic decline at late times (decay phase).
-  3. Physical parameter scaling (higher l0 → higher peak).
+  3. Physical parameter scaling (higher log10_l0 → higher peak).
   4. Numerical agreement with the original redback implementation.
   5. JIT idempotence (second call returns the same values).
   6. Model registered in MODEL_REGISTRY.
@@ -29,9 +29,9 @@ from redback_jax.models import MODEL_REGISTRY
 # ---------------------------------------------------------------------------
 _PARAMS = dict(
     mej=1.0,          # M_sun
-    E_sn=1e51,        # erg
+    log10_E_sn=51.0,  # log10(erg)
     kappa=0.1,        # cm^2/g
-    l0=1e45,          # erg/s
+    log10_l0=45.0,    # log10(erg/s)
     tau_sd=1e6,       # s
     nn=3.0,           # dipole braking index
     kappa_gamma=1.0,  # cm^2/g
@@ -89,8 +89,8 @@ def test_late_time_decay():
 def test_higher_l0_brighter():
     """Higher initial magnetar luminosity should give a brighter light curve."""
     times = jnp.array([5.0, 10.0, 20.0], dtype=jnp.float64)
-    out_lo = general_magnetar_driven_supernova_bolometric(times, **{**_PARAMS, 'l0': 1e44})
-    out_hi = general_magnetar_driven_supernova_bolometric(times, **{**_PARAMS, 'l0': 1e47})
+    out_lo = general_magnetar_driven_supernova_bolometric(times, **{**_PARAMS, 'log10_l0': 44.0})
+    out_hi = general_magnetar_driven_supernova_bolometric(times, **{**_PARAMS, 'log10_l0': 47.0})
     assert jnp.all(out_hi > out_lo), f"Expected hi > lo: hi={out_hi}, lo={out_lo}"
 
 
@@ -145,9 +145,9 @@ def test_registered():
 _B = 8   # batch size for unit tests (small enough to run quickly)
 _BATCH_PARAMS = {
     'mej':          jnp.full((_B,), _PARAMS['mej'],          dtype=jnp.float64),
-    'E_sn':         jnp.full((_B,), _PARAMS['E_sn'],         dtype=jnp.float64),
+    'log10_E_sn':  jnp.full((_B,), _PARAMS['log10_E_sn'],  dtype=jnp.float64),
     'kappa':        jnp.full((_B,), _PARAMS['kappa'],        dtype=jnp.float64),
-    'l0':           jnp.full((_B,), _PARAMS['l0'],           dtype=jnp.float64),
+    'log10_l0':    jnp.full((_B,), _PARAMS['log10_l0'],    dtype=jnp.float64),
     'tau_sd':       jnp.full((_B,), _PARAMS['tau_sd'],       dtype=jnp.float64),
     'nn':           jnp.full((_B,), _PARAMS['nn'],           dtype=jnp.float64),
     'kappa_gamma':  jnp.full((_B,), _PARAMS['kappa_gamma'],  dtype=jnp.float64),
@@ -193,9 +193,9 @@ def test_batched_heterogeneous_params():
     out = general_magnetar_driven_supernova_bolometric_batched(
         _TIMES,
         mej    = jnp.array(rng.uniform(0.5, 2.0, B),  dtype=jnp.float64),
-        E_sn   = jnp.array(10**rng.uniform(50, 51.5, B), dtype=jnp.float64),
+        log10_E_sn = jnp.array(rng.uniform(50, 51.5, B), dtype=jnp.float64),
         kappa  = jnp.full((B,), 0.1, dtype=jnp.float64),
-        l0     = jnp.array(10**rng.uniform(44, 46, B),   dtype=jnp.float64),
+        log10_l0 = jnp.array(rng.uniform(44, 46, B),   dtype=jnp.float64),
         tau_sd = jnp.full((B,), 1e6, dtype=jnp.float64),
         nn     = jnp.full((B,), 3.0, dtype=jnp.float64),
         kappa_gamma = jnp.full((B,), 1.0, dtype=jnp.float64),
@@ -245,9 +245,9 @@ def test_agreement_with_redback():
     lbol_redback = redback_fn(
         times_days,
         mej=p['mej'],
-        E_sn=p['E_sn'],
+        E_sn=10 ** p['log10_E_sn'],
         kappa=p['kappa'],
-        l0=p['l0'],
+        l0=10 ** p['log10_l0'],
         tau_sd=p['tau_sd'],
         nn=p['nn'],
         kappa_gamma=p['kappa_gamma'],

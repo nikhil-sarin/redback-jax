@@ -24,10 +24,19 @@ from .prior import (
     Prior,
 )
 
-from .likelihood import Likelihood, FluxDensityLikelihood
+from .batch import BatchedDataset, BatchedFluxDensityDataset
+
+from .likelihood import (
+    Likelihood,
+    FluxDensityLikelihood,
+    make_batched_log_likelihood,
+    make_batched_flux_density_log_likelihood,
+)
 
 from .nested_sampler import (
     NestedSampler,
+    BatchedNestedSampler,
+    BatchedFluxDensityNestedSampler,
     NSResult,
     HAS_BLACKJAX,
 )
@@ -57,9 +66,15 @@ __all__ = [
     'LogUniform',
     'Gaussian',
     'Prior',
+    'BatchedDataset',
+    'BatchedFluxDensityDataset',
     'Likelihood',
     'FluxDensityLikelihood',
+    'make_batched_log_likelihood',
+    'make_batched_flux_density_log_likelihood',
     'NestedSampler',
+    'BatchedNestedSampler',
+    'BatchedFluxDensityNestedSampler',
     'NSResult',
     'MCMCSampler',
     'MCMCResult',
