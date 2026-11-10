@@ -20,6 +20,11 @@ RUN pip3 install uv
 # mainline blackjax for the SMC+NUTS sampler used via run_nested_sampling (the
 # handley-lab NS fork is avoided: its older JAX API breaks on current JAX).
 RUN uv pip install --system --break-system-packages "jax[cuda13]"
+# ptxas bundled with the jax[cuda13] wheels lags the newest OSPool GPU-node archs
+# ("ptxas too old ... falling back to the driver to compile"), and the driver
+# fallback then fails the XLA compile, so every fit aborts. Pull the current
+# standalone ptxas so compilation targets the worker's compute capability.
+RUN uv pip install --system --break-system-packages -U nvidia-cuda-nvcc
 RUN uv pip install --system --break-system-packages blackjax anesthetic
 
 # redback-jax core last (pulls diffrax, jax-bandflux, unxt, wcosmo, ...).
