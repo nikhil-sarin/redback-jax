@@ -65,6 +65,7 @@ def _native_redback_wrapper(
     reverse_accelerated_fraction=None,
     reverse_radiation_function=None,
     reverse_radiation_parameters=None,
+    legacy_numerics=False,
 ):
     distance = (
         wcosmo.luminosity_distance(redshift, cosmo_H0, cosmo_Om0).value * MPC_TO_CM
@@ -108,6 +109,7 @@ def _native_redback_wrapper(
         radiation_parameters=radiation_parameters,
         phi_observer=phi_observer,
         reverse_shock=reverse_shock,
+        legacy_numerics=legacy_numerics,
         engine_duration=engine_duration,
         reverse_electron_index=reverse_electron_index,
         reverse_log10_epsilon_e=reverse_log10_epsilon_e,

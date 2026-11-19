@@ -73,6 +73,7 @@ def _log10_linear_interpolate(x, xp, log10_yp):
         "radiation_function",
         "reverse_shock",
         "reverse_radiation_function",
+        "legacy_numerics",
     ),
 )
 def native_afterglow_flux_density(
@@ -121,6 +122,7 @@ def native_afterglow_flux_density(
     reverse_accelerated_fraction=None,
     reverse_radiation_function=None,
     reverse_radiation_parameters=None,
+    legacy_numerics=False,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -351,6 +353,7 @@ def native_afterglow_flux_density(
             resolution,
             radius,
             local_density,
+            legacy_numerics,
         )
 
     if radius_override is None:

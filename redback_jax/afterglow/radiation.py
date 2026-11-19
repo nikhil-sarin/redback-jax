@@ -40,7 +40,7 @@ class ObserverState(NamedTuple):
     observer_time: jnp.ndarray
 
 
-@partial(jit, static_argnames=("expansion", "resolution"))
+@partial(jit, static_argnames=("expansion", "resolution", "legacy_numerics"))
 def forward_shock_state(
     gamma,
     gamma_minus_one,
@@ -62,8 +62,17 @@ def forward_shock_state(
     resolution=50,
     radius_override=None,
     log10_local_density_override=None,
+    legacy_numerics=False,
 ):
-    """Calculate shock and synchrotron state for one polar jet ring."""
+    """Calculate shock and synchrotron state for one polar jet ring.
+
+    Lateral spreading is homologous: every cell's solid angle grows with the jet's,
+    ``(1 - cos(theta_jet + growth)) / (1 - cos theta_jet)``, and the spreading radius
+    correction uses the jet opening angle. ``legacy_numerics=True`` reproduces the
+    resolution-dependent form (per-cell ``growth / resolution`` widening and the cell
+    width in the radius correction), whose post-jet-break flux scales roughly as 1/res.
+    """
+    theta_jet = latitude_step * resolution
     beta = jnp.sqrt(gamma_minus_one * (2.0 + gamma_minus_one)) / (1.0 + gamma_minus_one)
     log10_electrons = log10_swept_mass - math.log10(proton_mass)
 
@@ -80,10 +89,16 @@ def forward_shock_state(
     base_solid_angle = azimuth_step * (
         jnp.cos(theta - 0.5 * latitude_step) - jnp.cos(theta + 0.5 * latitude_step)
     )
-    expanded_solid_angle = azimuth_step * (
-        jnp.cos(theta - 0.5 * latitude_step)
-        - jnp.cos(theta + 0.5 * latitude_step + angular_growth / resolution)
-    )
+    if legacy_numerics:
+        expanded_solid_angle = azimuth_step * (
+            jnp.cos(theta - 0.5 * latitude_step)
+            - jnp.cos(theta + 0.5 * latitude_step + angular_growth / resolution)
+        )
+    else:
+        expanded_solid_angle = base_solid_angle * (
+            (1.0 - jnp.cos(theta_jet + angular_growth)) / (1.0 - jnp.cos(theta_jet))
+        )
+    spread_width = latitude_step if legacy_numerics else theta_jet
     solid_angle = jnp.where(expansion, expanded_solid_angle, base_solid_angle)
 
     if radius_override is None:
@@ -95,8 +110,8 @@ def forward_shock_state(
         ) / (3.0 - density_index)
         radius_base = jnp.power(10.0, log10_radius_base)
         relative_expansion = (
-            (1.0 - jnp.cos(latitude_step + angular_growth[0]))
-            / (1.0 - jnp.cos(latitude_step + angular_growth))
+            (1.0 - jnp.cos(spread_width + angular_growth[0]))
+            / (1.0 - jnp.cos(spread_width + angular_growth))
         ) ** (0.5 / (3.0 - density_index))
         radius_increment = jnp.diff(radius_base, prepend=0.0)
         radius = jnp.cumsum(
