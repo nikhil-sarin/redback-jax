@@ -848,15 +848,19 @@ def test_structured_public_wrappers_match_native_redback(model, expected_mjy):
 
 
 @pytest.mark.parametrize(
-    ("density_index", "expansion", "expected_mjy"),
+    ("density_index", "expansion", "legacy_numerics", "expected_mjy"),
     [
-        (0.0, True, [295.10217435, 1730.31589495, 29.74114130]),
-        (2.0, False, [84.91510751, 1783.73853997, 19.31117045]),
-        (2.0, True, [82.70605294, 1686.73641157, 7.32435741]),
+        # native redback with resolution-independent lateral spreading (default)
+        (0.0, True, False, [297.75439367, 1838.9228035, 38.21961435]),
+        (2.0, False, False, [84.91510751, 1783.73853997, 19.31117045]),
+        (2.0, True, False, [85.81316546, 1772.05717965, 15.74852955]),
+        # legacy_numerics=True reproduces the previous resolution-dependent spreading
+        (0.0, True, True, [295.10217435, 1730.31589495, 29.74114130]),
+        (2.0, True, True, [82.70605294, 1686.73641157, 7.32435741]),
     ],
 )
 def test_wind_and_expansion_match_native_redback(
-    density_index, expansion, expected_mjy
+    density_index, expansion, legacy_numerics, expected_mjy
 ):
     result = tophat_redback(
         jnp.array([1.0, 10.0, 100.0]),
@@ -876,6 +880,7 @@ def test_wind_and_expansion_match_native_redback(
         expansion=expansion,
         res=8,
         steps=64,
+        legacy_numerics=legacy_numerics,
     )
     np.testing.assert_allclose(result, expected_mjy, rtol=0.04)
 
