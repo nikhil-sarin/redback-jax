@@ -1015,7 +1015,7 @@ def general_magnetar_driven_supernova_bolometric_batched(
     f_nickel : array_like, shape (B,), optional
         Ni-56 mass fractions.  Defaults to zeros for all samples if None.
     n_grid : int, optional
-        ODE grid points (static — triggers recompile on change).  Default 2000.
+        Retained for API compatibility; the adaptive batched solver ignores this.
 
     Returns
     -------
@@ -1027,9 +1027,9 @@ def general_magnetar_driven_supernova_bolometric_batched(
                if f_nickel is None
                else jnp.asarray(f_nickel, dtype=jnp.float64))
     return jax.vmap(
-        lambda m, e, k, l, t, n, kg, fn: _magnetar_impl(
-            time, m, e, k, l, t, n, kg, fn, n_grid
-        )
+        lambda m, e, k, l, t, n, kg, fn: _run_magnetar_ode_diffrax(
+            time, m, e, k, l, t, n, kg, fn, 1e-5, 1e-8
+        )[0]
     )(
         mej_arr,
         jnp.asarray(log10_E_sn,  dtype=jnp.float64),
@@ -1301,6 +1301,7 @@ def _run_magnetar_ode_diffrax(
     f_nickel=0.0,
     rtol=1e-5,
     atol=1e-8,
+    max_steps=262144,
 ):
     """Run the ejecta ODE with diffrax Tsit5 (adaptive step-size).
 
@@ -1375,8 +1376,8 @@ def _run_magnetar_ode_diffrax(
         args=args,
         saveat=SaveAt(ts=time_day_sort),
         stepsize_controller=PIDController(rtol=rtol, atol=atol),
-        max_steps=262144,
-        throw=False,
+        max_steps=max_steps,
+        throw=True,
     )
 
     # Extract saved state (shape: N_save × 4)

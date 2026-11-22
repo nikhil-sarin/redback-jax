@@ -90,7 +90,8 @@ def metzger_kilonova_bolometric(time, mej, vej, beta, kappa,
     Barnes+16 thermalisation, solved via a sequential Euler ODE with
     jax.lax.scan.
 
-    :param time: source-frame time in days (must be strictly increasing, ≥2 points)
+    :param time: positive source-frame epochs in days; integration uses an internal
+        5000-point geometric grid starting at 0.01 seconds, then interpolates.
     :param mej: ejecta mass in solar masses
     :param vej: minimum ejecta velocity in units of c
     :param beta: velocity power-law slope (M ∝ v^{-beta})
@@ -105,6 +106,13 @@ def metzger_kilonova_bolometric(time, mej, vej, beta, kappa,
 
 def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor):
     mass_len = 200
+    epochs = jnp.asarray(time, dtype=jnp.result_type(time, jnp.float32))
+    # Extend past the final epoch so interpolation never uses the duplicated
+    # last luminosity sample from the scan.
+    time = jnp.geomspace(
+        1e-2 / _DAY_TO_S, jnp.maximum(jnp.max(epochs) * 1.01, 1.0),
+        5000, dtype=epochs.dtype,
+    )
     fp = time.dtype
 
     t_sec = time * _DAY_TO_S
@@ -129,7 +137,7 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
         # Metzger 2014 eq. 7: transition mass m_n ~ 1e-4 Msun separates
         # neutron-dominated outer layers (m << m_n) from r-process inner layers
         neutron_mass = 1e-4 * _SOLAR_MASS
-        Xn0 = ((1.0 - 2.0 * Ye) * 2.0 * jnp.arctan(neutron_mass
+        Xn0 = ((1.0 - Ye) * 2.0 * jnp.arctan(neutron_mass
                / (m_arr * _SOLAR_MASS)) / jnp.pi)
         Xr  = 1.0 - Xn0
 
@@ -142,7 +150,6 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
     log10_E_scale = jnp.maximum(
         jnp.log10(jnp.maximum(jnp.max(E0), jnp.array(1e-30, dtype=fp))) + _LOG10_MSUN,
         jnp.array(30.0, dtype=fp))
-    E_scale = jnp.power(jnp.array(10.0, dtype=fp), log10_E_scale)  # erg
 
     # msun_per_E = solar_mass / E_scale  (for converting Msun*(cm/s)^2 → normalized)
     msun_per_E = jnp.power(jnp.array(10.0, dtype=fp),
@@ -172,16 +179,13 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
         # lum_n = E_n / (td_v + t_i*v/c)  [normalized lum, erg/s / E_scale]
         lum_n = E_n[:-1] / (td_v + t_i * v_m[:-1] / _SPEED_OF_LIGHT)
 
-        # heat in normalized units: edotr [erg/s/g] * dm [Msun] * msun [g/Msun] / E_scale
-        heat_n = (edotr_i + edotn[:-1]) * dm * msun_per_E
+        # E_n is energy per solar mass / E_scale: apply shell mass only in L_total.
+        heat_n = (edotr_i + edotn[:-1]) * msun_per_E
 
         E_new_inner = E_n[:-1] + (heat_n - E_n[:-1] / t_i - lum_n) * dt_i
         E_new = jnp.concatenate([jnp.maximum(E_new_inner, jnp.array(0.0, dtype=fp)), E_n[-1:]])
 
-        # L_total = sum(lum_n * dm * msun_per_E * E_scale) = sum(lum_n * dm) * solar_mass
-        # = sum(lum * dm) * solar_mass where lum = lum_n * E_scale
-        # Normalized: L_n_total = sum(lum_n * dm)  (to convert: * solar_mass / msun_per_E = E_scale)
-        # But we can just store lum_n_total and multiply by E_scale at the end
+        # Integrate specific luminosity over shell masses exactly once.
         L_n_total = jnp.sum(lum_n * dm)  # in 1/s (normalized by E_scale)
 
         tau = (m_arr[:-1] * _SOLAR_MASS * kap[:-1]
@@ -200,7 +204,7 @@ def _metzger_kilonova_scan(time, mej, vej, beta, kappa, vmax, neutron_precursor)
     log10_L = log10_L_n + log10_E_scale
     log10_L = jnp.concatenate([log10_L, log10_L[-1:]])
 
-    return log10_L
+    return jnp.interp(epochs, time, log10_L)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +220,8 @@ def magnetar_boosted_kilonova_bolometric(time, mej, vej, beta, kappa,
     """
     Bolometric kilonova light curve with magnetar spin-down energy injection.
 
-    :param time: source-frame time in days (strictly increasing, ≥2 points)
+    :param time: positive source-frame epochs in days; integration uses an internal
+        5000-point geometric grid starting at 0.01 seconds, then interpolates.
     :param mej: ejecta mass in solar masses
     :param vej: minimum ejecta velocity in units of c
     :param beta: velocity power-law slope
@@ -240,6 +245,13 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
                              p0, bp, mass_ns, theta_pb,
                              th_eff, vmax, neutron_precursor):
     mass_len = 200
+    epochs = jnp.asarray(time, dtype=jnp.result_type(time, jnp.float32))
+    # Extend past the final epoch so interpolation never uses the duplicated
+    # last luminosity sample from the scan.
+    time = jnp.geomspace(
+        1e-2 / _DAY_TO_S, jnp.maximum(jnp.max(epochs) * 1.01, 1.0),
+        5000, dtype=epochs.dtype,
+    )
     fp = time.dtype
 
     t_sec = time * _DAY_TO_S
@@ -267,7 +279,7 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
     if neutron_precursor:
         Ye           = _electron_fraction_from_kappa(kappa)
         neutron_mass = 1e-4 * _SOLAR_MASS
-        Xn0 = ((1.0 - 2.0 * Ye)
+        Xn0 = ((1.0 - Ye)
                * 2.0 * jnp.arctan(neutron_mass / (m_arr * _SOLAR_MASS)) / jnp.pi)
         Xr  = 1.0 - Xn0
 
@@ -275,7 +287,6 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
 
     # Use log10_L_mag[0] as energy scale (magnetar dominates)
     log10_E_scale = jnp.maximum(log10_L_mag[0], jnp.array(30.0, dtype=fp))
-    E_scale       = jnp.power(jnp.array(10.0, dtype=fp), log10_E_scale)
     msun_per_E    = jnp.power(jnp.array(10.0, dtype=fp),
                                jnp.array(_LOG10_MSUN, dtype=fp) - log10_E_scale)
 
@@ -297,13 +308,13 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
                 / (4.0 * jnp.pi * v_m[:-1] * _SPEED_OF_LIGHT * t_i * beta))
 
         lum_n = E_n[:-1] / (td_v + t_i * v_m[:-1] / _SPEED_OF_LIGHT)
-        heat_n = (edotr_i + edotn[:-1]) * dm * msun_per_E
+        heat_n = (edotr_i + edotn[:-1]) * msun_per_E
 
         # Magnetar injection (normalized): L_mag / E_scale = 10^(log10_L_mag - log10_E_scale)
         L_mag_n = jnp.power(jnp.array(10.0, dtype=fp),
                              log10_L_mag_i - log10_E_scale)
         mag_n = jnp.concatenate([
-            jnp.array([th_eff * L_mag_n], dtype=fp),
+            jnp.array([th_eff * L_mag_n / dm[0]], dtype=fp),
             jnp.zeros(mass_len - 2, dtype=fp),
         ])
 
@@ -326,4 +337,4 @@ def _magnetar_kilonova_scan(time, mej, vej, beta, kappa,
     log10_L_n = jnp.log10(jnp.maximum(L_n_arr, jnp.array(1e-30, dtype=fp)))
     log10_L = log10_L_n + log10_E_scale
     log10_L = jnp.concatenate([log10_L, log10_L[-1:]])
-    return log10_L
+    return jnp.interp(epochs, time, log10_L)

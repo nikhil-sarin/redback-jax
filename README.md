@@ -100,7 +100,7 @@ flux_mjy = gaussian_redback(
 
 Set `output_format="magnitude"` for AB magnitudes. The angular resolution
 `res` and radial resolution `steps` are static compilation settings; their
-defaults are 50 and 250. Use explicit convergence tests when reducing them for
+defaults are 50 and 1000. Use explicit convergence tests when reducing them for
 exploratory inference.
 
 ## Model coverage

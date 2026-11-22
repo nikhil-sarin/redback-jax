@@ -73,6 +73,7 @@ def _log10_linear_interpolate(x, xp, log10_yp):
         "radiation_function",
         "reverse_shock",
         "reverse_radiation_function",
+        "legacy_numerics",
     ),
 )
 def native_afterglow_flux_density(
@@ -97,7 +98,7 @@ def native_afterglow_flux_density(
     expansion=True,
     expansion_index=1.0,
     resolution=50,
-    steps=250,
+    steps=1000,
     refreshed=False,
     gamma_injection=2.0,
     energy_factor=1.0,
@@ -121,6 +122,7 @@ def native_afterglow_flux_density(
     reverse_accelerated_fraction=None,
     reverse_radiation_function=None,
     reverse_radiation_parameters=None,
+    legacy_numerics=False,
 ):
     """Evaluate a native Redback-style afterglow in mJy.
 
@@ -351,6 +353,7 @@ def native_afterglow_flux_density(
             resolution,
             radius,
             local_density,
+            legacy_numerics,
         )
 
     if radius_override is None:
@@ -394,7 +397,10 @@ def native_afterglow_flux_density(
         patch_angles = observer_angle_patches(
             patch_phi, patch_theta, theta_observer, phi_observer
         )
-    observers = vmap(observer_state, in_axes=(None, 0, None, 0, 0, 0))(
+    observers = vmap(
+        lambda *args: observer_state(*args, legacy_numerics=legacy_numerics),
+        in_axes=(None, 0, None, 0, 0, 0),
+    )(
         log10_luminosity_distance,
         solid_angle,
         azimuth_step,
@@ -476,7 +482,8 @@ def native_afterglow_flux_density(
             patch_reverse_gamma = reverse_dynamics.bulk_gamma
             patch_reverse_time = reverse_dynamics.comoving_time
         reverse_observers = vmap(
-            reverse_observer_state, in_axes=(None, 0, None, 0, 0, 0, 0)
+            lambda *args: reverse_observer_state(*args, legacy_numerics=legacy_numerics),
+            in_axes=(None, 0, None, 0, 0, 0, 0)
         )(
             log10_luminosity_distance,
             solid_angle,

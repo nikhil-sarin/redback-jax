@@ -40,7 +40,7 @@ class ObserverState(NamedTuple):
     observer_time: jnp.ndarray
 
 
-@partial(jit, static_argnames=("expansion", "resolution"))
+@partial(jit, static_argnames=("expansion", "resolution", "legacy_numerics"))
 def forward_shock_state(
     gamma,
     gamma_minus_one,
@@ -62,8 +62,17 @@ def forward_shock_state(
     resolution=50,
     radius_override=None,
     log10_local_density_override=None,
+    legacy_numerics=False,
 ):
-    """Calculate shock and synchrotron state for one polar jet ring."""
+    """Calculate shock and synchrotron state for one polar jet ring.
+
+    Lateral spreading is homologous: every cell's solid angle grows with the jet's,
+    ``(1 - cos(theta_jet + growth)) / (1 - cos theta_jet)``, and the spreading radius
+    correction uses the jet opening angle. ``legacy_numerics=True`` reproduces the
+    resolution-dependent form (per-cell ``growth / resolution`` widening and the cell
+    width in the radius correction), whose post-jet-break flux scales roughly as 1/res.
+    """
+    theta_jet = latitude_step * resolution
     beta = jnp.sqrt(gamma_minus_one * (2.0 + gamma_minus_one)) / (1.0 + gamma_minus_one)
     log10_electrons = log10_swept_mass - math.log10(proton_mass)
 
@@ -80,10 +89,16 @@ def forward_shock_state(
     base_solid_angle = azimuth_step * (
         jnp.cos(theta - 0.5 * latitude_step) - jnp.cos(theta + 0.5 * latitude_step)
     )
-    expanded_solid_angle = azimuth_step * (
-        jnp.cos(theta - 0.5 * latitude_step)
-        - jnp.cos(theta + 0.5 * latitude_step + angular_growth / resolution)
-    )
+    if legacy_numerics:
+        expanded_solid_angle = azimuth_step * (
+            jnp.cos(theta - 0.5 * latitude_step)
+            - jnp.cos(theta + 0.5 * latitude_step + angular_growth / resolution)
+        )
+    else:
+        expanded_solid_angle = base_solid_angle * (
+            (1.0 - jnp.cos(theta_jet + angular_growth)) / (1.0 - jnp.cos(theta_jet))
+        )
+    spread_width = latitude_step if legacy_numerics else theta_jet
     solid_angle = jnp.where(expansion, expanded_solid_angle, base_solid_angle)
 
     if radius_override is None:
@@ -95,10 +110,15 @@ def forward_shock_state(
         ) / (3.0 - density_index)
         radius_base = jnp.power(10.0, log10_radius_base)
         relative_expansion = (
-            (1.0 - jnp.cos(latitude_step + angular_growth[0]))
-            / (1.0 - jnp.cos(latitude_step + angular_growth))
+            (1.0 - jnp.cos(spread_width + angular_growth[0]))
+            / (1.0 - jnp.cos(spread_width + angular_growth))
         ) ** (0.5 / (3.0 - density_index))
         radius_increment = jnp.diff(radius_base, prepend=0.0)
+        if not legacy_numerics:
+            relative_expansion = 0.5 * (
+                relative_expansion
+                + jnp.concatenate([relative_expansion[:1], relative_expansion[:-1]])
+            )
         radius = jnp.cumsum(
             jnp.where(
                 expansion, radius_increment * relative_expansion, radius_increment
@@ -294,7 +314,7 @@ def _four_velocity_for_radiation(gamma):
     return jnp.sqrt(jnp.maximum((gamma - 1.0) * (gamma + 1.0), 0.0))
 
 
-@jit
+@partial(jit, static_argnames=("legacy_numerics",))
 def observer_state(
     log10_distance,
     initial_solid_angle,
@@ -302,15 +322,21 @@ def observer_state(
     observer_angle_value,
     gamma,
     shock,
+    legacy_numerics=False,
 ):
     """Transform a forward-shock state to one observer-facing angular patch."""
     cosine = jnp.cos(observer_angle_value)
     radius_increment = jnp.diff(shock.radius, prepend=0.0)
+    inverse_beta = 1.0 / shock.beta
+    if not legacy_numerics:
+        inverse_beta = 0.5 * (
+            inverse_beta + jnp.concatenate([inverse_beta[:1], inverse_beta[:-1]])
+        )
     observer_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - cosine) / speed_of_light
+        radius_increment * (inverse_beta - cosine) / speed_of_light
     )
     on_axis_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - 1.0) / speed_of_light
+        radius_increment * (inverse_beta - 1.0) / speed_of_light
     )
     log10_doppler = -jnp.log10(gamma * (1.0 - shock.beta * cosine))
     log10_gamma_cooling = (
@@ -354,7 +380,7 @@ def observer_state(
     )
 
 
-@jit
+@partial(jit, static_argnames=("legacy_numerics",))
 def reverse_observer_state(
     log10_distance,
     initial_solid_angle,
@@ -363,12 +389,18 @@ def reverse_observer_state(
     bulk_gamma,
     comoving_time,
     shock,
+    legacy_numerics=False,
 ):
     """Transform a reverse-shock state using its evolved comoving age."""
     cosine = jnp.cos(observer_angle_value)
     radius_increment = jnp.diff(shock.radius, prepend=0.0)
+    inverse_beta = 1.0 / shock.beta
+    if not legacy_numerics:
+        inverse_beta = 0.5 * (
+            inverse_beta + jnp.concatenate([inverse_beta[:1], inverse_beta[:-1]])
+        )
     observer_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - cosine) / speed_of_light
+        radius_increment * (inverse_beta - cosine) / speed_of_light
     )
     log10_doppler = -jnp.log10(bulk_gamma * (1.0 - shock.beta * cosine))
     log10_gamma_cooling = (
