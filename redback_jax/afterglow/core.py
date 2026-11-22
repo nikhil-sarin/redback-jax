@@ -98,7 +98,7 @@ def native_afterglow_flux_density(
     expansion=True,
     expansion_index=1.0,
     resolution=50,
-    steps=250,
+    steps=1000,
     refreshed=False,
     gamma_injection=2.0,
     energy_factor=1.0,
@@ -397,7 +397,10 @@ def native_afterglow_flux_density(
         patch_angles = observer_angle_patches(
             patch_phi, patch_theta, theta_observer, phi_observer
         )
-    observers = vmap(observer_state, in_axes=(None, 0, None, 0, 0, 0))(
+    observers = vmap(
+        lambda *args: observer_state(*args, legacy_numerics=legacy_numerics),
+        in_axes=(None, 0, None, 0, 0, 0),
+    )(
         log10_luminosity_distance,
         solid_angle,
         azimuth_step,
@@ -479,7 +482,8 @@ def native_afterglow_flux_density(
             patch_reverse_gamma = reverse_dynamics.bulk_gamma
             patch_reverse_time = reverse_dynamics.comoving_time
         reverse_observers = vmap(
-            reverse_observer_state, in_axes=(None, 0, None, 0, 0, 0, 0)
+            lambda *args: reverse_observer_state(*args, legacy_numerics=legacy_numerics),
+            in_axes=(None, 0, None, 0, 0, 0, 0)
         )(
             log10_luminosity_distance,
             solid_angle,

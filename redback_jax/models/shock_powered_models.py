@@ -71,7 +71,7 @@ def shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy, nn, d
     log10_td_const = (jnp.array(_math.log10(3.0), dtype=fp) + log10_kappa + log10_kk_pow
                       - jnp.log10(jnp.array(abs(n - 1.0), dtype=fp))
                       - jnp.array(_LOG10_C_CGS, dtype=fp)
-                      - jnp.array(_LOG10_DAY_TO_S, dtype=fp))
+                      - 2.0 * jnp.array(_LOG10_DAY_TO_S, dtype=fp))
     log10_td = 0.5 * (log10_td_const + log10_mass_g - log10_vt)
     td = jnp.power(jnp.array(10.0, dtype=fp), log10_td)  # days
 
@@ -91,8 +91,7 @@ def shock_cooling_bolometric(time, log10_mass, log10_radius, log10_energy, nn, d
     log10_lbol_pre = log10_prefactor + (4.0 / (n - 2.0)) * (log10_td_val - log10_t)
 
     # Post-peak: lbol = prefactor * exp(-0.5*(t^2/td^2 - 1))
-    exponent = jnp.clip(-0.5 * (t ** 2 / jnp.maximum(td, jnp.array(1e-30, dtype=fp)) ** 2 - 1.0),
-                         jnp.array(-87.0, dtype=fp), jnp.array(87.0, dtype=fp))
+    exponent = -0.5 * (t ** 2 / jnp.maximum(td, jnp.array(1e-30, dtype=fp)) ** 2 - 1.0)
     log10_lbol_post = log10_prefactor + exponent * jnp.array(_LOG10_E, dtype=fp)
 
     return jnp.where(t < td, log10_lbol_pre, log10_lbol_post)

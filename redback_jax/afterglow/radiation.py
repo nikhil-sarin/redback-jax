@@ -114,6 +114,11 @@ def forward_shock_state(
             / (1.0 - jnp.cos(spread_width + angular_growth))
         ) ** (0.5 / (3.0 - density_index))
         radius_increment = jnp.diff(radius_base, prepend=0.0)
+        if not legacy_numerics:
+            relative_expansion = 0.5 * (
+                relative_expansion
+                + jnp.concatenate([relative_expansion[:1], relative_expansion[:-1]])
+            )
         radius = jnp.cumsum(
             jnp.where(
                 expansion, radius_increment * relative_expansion, radius_increment
@@ -309,7 +314,7 @@ def _four_velocity_for_radiation(gamma):
     return jnp.sqrt(jnp.maximum((gamma - 1.0) * (gamma + 1.0), 0.0))
 
 
-@jit
+@partial(jit, static_argnames=("legacy_numerics",))
 def observer_state(
     log10_distance,
     initial_solid_angle,
@@ -317,15 +322,21 @@ def observer_state(
     observer_angle_value,
     gamma,
     shock,
+    legacy_numerics=False,
 ):
     """Transform a forward-shock state to one observer-facing angular patch."""
     cosine = jnp.cos(observer_angle_value)
     radius_increment = jnp.diff(shock.radius, prepend=0.0)
+    inverse_beta = 1.0 / shock.beta
+    if not legacy_numerics:
+        inverse_beta = 0.5 * (
+            inverse_beta + jnp.concatenate([inverse_beta[:1], inverse_beta[:-1]])
+        )
     observer_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - cosine) / speed_of_light
+        radius_increment * (inverse_beta - cosine) / speed_of_light
     )
     on_axis_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - 1.0) / speed_of_light
+        radius_increment * (inverse_beta - 1.0) / speed_of_light
     )
     log10_doppler = -jnp.log10(gamma * (1.0 - shock.beta * cosine))
     log10_gamma_cooling = (
@@ -369,7 +380,7 @@ def observer_state(
     )
 
 
-@jit
+@partial(jit, static_argnames=("legacy_numerics",))
 def reverse_observer_state(
     log10_distance,
     initial_solid_angle,
@@ -378,12 +389,18 @@ def reverse_observer_state(
     bulk_gamma,
     comoving_time,
     shock,
+    legacy_numerics=False,
 ):
     """Transform a reverse-shock state using its evolved comoving age."""
     cosine = jnp.cos(observer_angle_value)
     radius_increment = jnp.diff(shock.radius, prepend=0.0)
+    inverse_beta = 1.0 / shock.beta
+    if not legacy_numerics:
+        inverse_beta = 0.5 * (
+            inverse_beta + jnp.concatenate([inverse_beta[:1], inverse_beta[:-1]])
+        )
     observer_time = jnp.cumsum(
-        radius_increment * (1.0 / shock.beta - cosine) / speed_of_light
+        radius_increment * (inverse_beta - cosine) / speed_of_light
     )
     log10_doppler = -jnp.log10(bulk_gamma * (1.0 - shock.beta * cosine))
     log10_gamma_cooling = (

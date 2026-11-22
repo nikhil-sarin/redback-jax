@@ -166,17 +166,12 @@ def test_batched_output_finite():
 
 
 def test_batched_agrees_with_single():
-    """Each row of the batched output must match the single-sample Euler model.
-
-    The batched function uses the fixed-step Euler backend; compare against the
-    single-call function with the same backend (solver='euler') so the two paths
-    are numerically identical rather than differing by ODE solver tolerance.
-    """
+    """Batching must preserve the accuracy of the default adaptive solver."""
     out_batch = np.array(
         general_magnetar_driven_supernova_bolometric_batched(_TIMES, **_BATCH_PARAMS)
     )
     out_single = np.array(
-        general_magnetar_driven_supernova_bolometric(_TIMES, **_PARAMS, solver='euler')
+        general_magnetar_driven_supernova_bolometric(_TIMES, **_PARAMS)
     )
     # All rows should be identical since all batch elements have the same params
     for i in range(_B):
@@ -263,6 +258,10 @@ def test_agreement_with_redback():
     )
 
     diff = np.abs(log10_jax - log10_redback)
+    batched = general_magnetar_driven_supernova_bolometric_batched(
+        jnp.asarray(times_days), **{key: jnp.array([value]) for key, value in p.items()}
+    )
+    np.testing.assert_allclose(batched[0], log10_redback, atol=0.05, rtol=0)
     assert np.all(diff < 0.05), (
         f"JAX vs redback log10(L) differs by > 0.05 dex:\n"
         f"  times     = {times_days}\n"

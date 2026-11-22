@@ -208,3 +208,12 @@ Numerical configuration
 ``res`` controls both polar and azimuthal resolution, producing ``res**2``
 angular patches. ``steps`` controls the radial grid. Both are static compilation
 settings and should be varied in convergence tests.
+
+The public defaults are ``res=50`` and ``steps=1000``. Radius corrections and
+observer arrival times use trapezoidal quadrature. Lateral spreading uses the
+jet opening angle, independent of angular cell width. Set
+``legacy_numerics=True`` to reproduce the previous cell-dependent spreading
+and first-order quadrature; native Redback parity fixtures use that option.
+Changing the integration rule changes fluxes even without spreading. The
+default is a compromise, not a universal accuracy guarantee: test both angular
+and radial convergence for the viewing angles and epochs of each analysis.

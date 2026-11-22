@@ -76,6 +76,7 @@ def test_tophat_onaxis_radio():
     out = np.array(tophat_redback(
         jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=100, steps=250,
+        legacy_numerics=True,
     ))
 
     assert out.shape == ref.shape
@@ -101,6 +102,7 @@ def test_tophat_offaxis_optical():
         jnp.array(time), **params_offaxis,
         frequency=jnp.array(freq),
         res=100, steps=250,
+        legacy_numerics=True,
     ))
 
     assert out.shape == ref.shape
@@ -123,6 +125,7 @@ def test_tophat_multiband():
     out = np.array(tophat_redback(
         jnp.array(time), **PARAMS, frequency=jnp.array(freq),
         res=100, steps=250,
+        legacy_numerics=True,
     ))
 
     assert out.shape == ref.shape

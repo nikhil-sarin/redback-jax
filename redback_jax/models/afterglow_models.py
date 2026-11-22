@@ -39,7 +39,7 @@ def _native_redback_wrapper(
     expansion=True,
     a1=1.0,
     res=50,
-    steps=250,
+    steps=1000,
     cosmo_H0=PLANCK18_H0,
     cosmo_Om0=PLANCK18_OM0,
     refreshed=False,
